@@ -1,7 +1,8 @@
 import type {
   AcroFormFieldValue,
   AcroFormWidgetInfo,
-  PageOverlayItem
+  PageOverlayItem,
+  TextOverlayItem
 } from "../types";
 import { escapeHtml } from "../utils/format";
 import { ICONS } from "../utils/icons";
@@ -48,6 +49,17 @@ interface DragState {
 
 function clamp(v: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, v));
+}
+
+function isContractCheckbox(item: PageOverlayItem): boolean {
+  return item.kind === "text" && item.contractField?.fieldKind === "checkbox";
+}
+
+function sortOverlaysInReadingOrder(items: PageOverlayItem[]): PageOverlayItem[] {
+  return [...items].sort((a, b) => {
+    const rowDiff = Math.round(a.yNorm * 55) - Math.round(b.yNorm * 55);
+    return rowDiff !== 0 ? rowDiff : a.xNorm - b.xNorm;
+  });
 }
 
 function cssFontFamily(family: "helvetica" | "times" | "courier"): string {
@@ -142,8 +154,17 @@ export class PageOverlayLayer {
   public startInlineEdit(itemId: string): void {
     const item = this.items.find((o) => o.id === itemId);
     if (!item || (item.kind !== "text" && item.kind !== "redact")) return;
+
+    if (isContractCheckbox(item)) {
+      this.toggleContractCheckbox(itemId);
+      return;
+    }
+
+    if (this.selectedId !== itemId) {
+      this.selectedId = itemId;
+      this.options.onSelect(itemId);
+    }
     this.editingId = itemId;
-    this.selectedId = itemId;
     this.renderOverlays();
 
     const textarea = this.elementMap
@@ -162,12 +183,105 @@ export class PageOverlayLayer {
     }
   }
 
+  public focusFirstContractField(): boolean {
+    const contractFields = sortOverlaysInReadingOrder(
+      this.items.filter((o) => o.kind === "text" && Boolean(o.contractField))
+    );
+    if (contractFields.length === 0) return false;
+
+    const target =
+      contractFields.find((o) => o.kind === "text" && !o.text.trim()) ??
+      contractFields[0];
+    this.focusOverlayTarget(target);
+    return true;
+  }
+
+  private focusOverlayTarget(target: PageOverlayItem): void {
+    const el = this.elementMap.get(target.id);
+    el?.scrollIntoView({ block: "nearest", inline: "nearest" });
+
+    if (isContractCheckbox(target)) {
+      this.editingId = null;
+      if (this.selectedId !== target.id) {
+        this.selectedId = target.id;
+        this.options.onSelect(target.id);
+      } else {
+        this.renderOverlays();
+      }
+      this.elementMap.get(target.id)?.focus();
+      return;
+    }
+
+    this.startInlineEdit(target.id);
+  }
+
+  private navigateOverlayByTab(direction: 1 | -1): boolean {
+    const navigable = sortOverlaysInReadingOrder(
+      this.items.filter((o) => o.kind === "text" || o.kind === "redact")
+    );
+    if (navigable.length === 0) return false;
+
+    const currentIdx = this.selectedId
+      ? navigable.findIndex((o) => o.id === this.selectedId)
+      : -1;
+    const nextIdx =
+      currentIdx === -1
+        ? direction === 1
+          ? 0
+          : navigable.length - 1
+        : (currentIdx + direction + navigable.length) % navigable.length;
+
+    const target = navigable[nextIdx];
+    this.focusOverlayTarget(target);
+    return true;
+  }
+
+  private toggleContractCheckbox(itemId: string): void {
+    const target = this.items.find((o) => o.id === itemId);
+    if (!target || target.kind !== "text" || !isContractCheckbox(target)) return;
+
+    const nextText = target.text.trim() ? "" : "X";
+    const updated = this.items.map((o) =>
+      o.id === itemId && o.kind === "text" ? { ...o, text: nextText } : o
+    );
+    this.items = updated;
+    this.editingId = null;
+    this.selectedId = itemId;
+    this.options.onMutate(updated, true);
+    this.elementMap.get(itemId)?.focus();
+  }
+
   public handleKeyDown(event: KeyboardEvent): boolean {
-    if (!this.selectedId) return false;
     if (this.editingId) return false;
+
+    if (event.key === "Tab" && this.selectedId) {
+      const hasSelectedEditable = this.items.some(
+        (o) =>
+          o.id === this.selectedId && (o.kind === "text" || o.kind === "redact")
+      );
+      if (hasSelectedEditable) {
+        event.preventDefault();
+        return this.navigateOverlayByTab(event.shiftKey ? -1 : 1);
+      }
+    }
+
+    if (!this.selectedId) return false;
 
     const item = this.items.find((o) => o.id === this.selectedId);
     if (!item) return false;
+
+    if (isContractCheckbox(item)) {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        this.toggleContractCheckbox(item.id);
+        return true;
+      }
+      if (event.key === " ") {
+        // Prevent page scroll; actual toggle fires on keyup matching native checkbox/button behavior
+        event.preventDefault();
+        return true;
+      }
+    }
 
     if (event.key === "Delete" || event.key === "Backspace") {
       event.preventDefault();
@@ -519,6 +633,14 @@ export class PageOverlayLayer {
         return;
       }
 
+      if (!st.hasMoved && st.itemId) {
+        const clickedItem = this.items.find((o) => o.id === st.itemId);
+        if (clickedItem && isContractCheckbox(clickedItem)) {
+          this.toggleContractCheckbox(clickedItem.id);
+        }
+        return;
+      }
+
       if (st.hasMoved && st.itemId) {
         this.options.onMutate(this.items, true);
       }
@@ -526,6 +648,16 @@ export class PageOverlayLayer {
 
     this.overlayLayerEl.addEventListener("pointerup", finishPointer);
     this.overlayLayerEl.addEventListener("pointercancel", finishPointer);
+
+    this.overlayLayerEl.addEventListener("keyup", (e) => {
+      if (e.key !== " " || this.editingId || !this.selectedId) return;
+      const item = this.items.find((o) => o.id === this.selectedId);
+      if (item && isContractCheckbox(item)) {
+        e.preventDefault();
+        e.stopPropagation();
+        this.toggleContractCheckbox(item.id);
+      }
+    });
 
     this.overlayLayerEl.addEventListener("dblclick", (e) => {
       const target = e.target as HTMLElement;
@@ -600,11 +732,31 @@ export class PageOverlayLayer {
     for (const item of this.items) {
       const isSelected = item.id === this.selectedId;
       const isEditing = item.id === this.editingId;
+      const isContractField = item.kind === "text" && Boolean(item.contractField);
+      const isCheckbox = isContractCheckbox(item);
+      const isEmptyContract =
+        isContractField && item.kind === "text" && item.text.trim().length === 0;
+
       const el = document.createElement("div");
-      el.className = `pdf-overlay-item kind-${item.kind}${isSelected ? " is-selected" : ""}${isEditing ? " is-editing" : ""}`;
+      el.className = [
+        `pdf-overlay-item kind-${item.kind}`,
+        isSelected ? "is-selected" : "",
+        isEditing ? "is-editing" : "",
+        isContractField ? "is-contract-field" : "",
+        isEmptyContract ? "is-contract-empty" : "",
+        isCheckbox ? "is-contract-checkbox" : ""
+      ]
+        .filter(Boolean)
+        .join(" ");
       el.dataset.overlayId = item.id;
       el.tabIndex = 0;
-      el.setAttribute("role", "group");
+      el.setAttribute("role", isCheckbox ? "checkbox" : "group");
+      if (isCheckbox && item.kind === "text") {
+        el.setAttribute(
+          "aria-checked",
+          String(item.text.trim().toUpperCase() === "X")
+        );
+      }
       el.setAttribute("aria-label", this.describeOverlay(item));
 
       el.style.left = `${item.xNorm * 100}%`;
@@ -657,6 +809,8 @@ export class PageOverlayLayer {
             "Atenção: emojis ou símbolos fora do padrão WinAnsi serão convertidos para '?' ao exportar.";
           warnEl.hidden = !sanitizeWinAnsiText(textVal).hadUnsupported;
 
+          let blurHandled = false;
+
           ta.addEventListener("input", () => {
             warnEl.hidden = !sanitizeWinAnsiText(ta.value).hadUnsupported;
             this.items = this.items.map((o) => {
@@ -668,14 +822,25 @@ export class PageOverlayLayer {
             this.options.onMutate(this.items, false);
           });
           ta.addEventListener("keydown", (ev) => {
+            if (ev.isComposing || ev.keyCode === 229) return;
+            if (ev.key === "Tab") {
+              ev.stopPropagation();
+              ev.preventDefault();
+              blurHandled = true;
+              this.options.onMutate(this.items, true);
+              this.navigateOverlayByTab(ev.shiftKey ? -1 : 1);
+              return;
+            }
             if (ev.key === "Escape") {
               ev.stopPropagation();
               ev.preventDefault();
+              blurHandled = true;
               this.options.onMutate(this.items, true);
               this.stopInlineEdit();
             }
           });
           ta.addEventListener("blur", () => {
+            if (blurHandled) return;
             this.options.onMutate(this.items, true);
             window.setTimeout(() => {
               if (this.editingId === item.id) {
@@ -689,11 +854,21 @@ export class PageOverlayLayer {
         } else {
           const textDiv = document.createElement("div");
           textDiv.className = "overlay-text-preview";
-          textDiv.textContent =
-            textVal ||
-            (item.kind === "text" ? "Clique duplo para editar" : "");
-          if (!textVal && item.kind === "text") {
-            textDiv.classList.add("is-placeholder");
+          if (isCheckbox) {
+            textDiv.textContent = textVal.trim() ? "X" : "";
+          } else if (isContractField && item.kind === "text" && item.contractField) {
+            textDiv.textContent =
+              textVal || item.contractField.labelHint || "Preencher...";
+            if (!textVal) {
+              textDiv.classList.add("is-placeholder", "is-contract-placeholder");
+            }
+          } else {
+            textDiv.textContent =
+              textVal ||
+              (item.kind === "text" ? "Clique duplo para editar" : "");
+            if (!textVal && item.kind === "text") {
+              textDiv.classList.add("is-placeholder");
+            }
           }
           textDiv.style.fontFamily = cssFontFamily(item.fontFamily);
           textDiv.style.fontSize = `${item.fontSizePt * scale}px`;
@@ -701,7 +876,7 @@ export class PageOverlayLayer {
           textDiv.style.fontWeight = item.bold ? "700" : "400";
           textDiv.style.fontStyle = item.italic ? "italic" : "normal";
           textDiv.style.textAlign = item.align;
-          textDiv.style.padding = `${padPx}px`;
+          textDiv.style.padding = isCheckbox ? "0px" : `${padPx}px`;
           el.appendChild(textDiv);
         }
       }
@@ -710,6 +885,8 @@ export class PageOverlayLayer {
         const controls = document.createElement("div");
         controls.className = "overlay-selection-chrome";
         const canEditText = item.kind === "text" || item.kind === "redact";
+        const editIcon = isCheckbox ? ICONS.checkSquare : ICONS.typeText;
+        const editTitle = isCheckbox ? "Marcar ou desmarcar (Espaço)" : "Editar texto";
         controls.innerHTML = `
           <span class="overlay-handle nw" data-ov-resize="nw" aria-hidden="true"></span>
           <span class="overlay-handle ne" data-ov-resize="ne" aria-hidden="true"></span>
@@ -719,7 +896,7 @@ export class PageOverlayLayer {
           <div class="overlay-mini-bar">
             ${
               canEditText
-                ? `<button type="button" class="overlay-mini-btn" data-ov-action="edit" title="Editar texto" aria-label="Editar texto">${ICONS.typeText}</button>`
+                ? `<button type="button" class="overlay-mini-btn" data-ov-action="edit" title="${editTitle}" aria-label="${editTitle}">${editIcon}</button>`
                 : ""
             }
             <button type="button" class="overlay-mini-btn" data-ov-action="duplicate" title="Duplicar camada" aria-label="Duplicar camada">${ICONS.copy}</button>
@@ -891,6 +1068,15 @@ export class PageOverlayLayer {
       case "image":
         return `Imagem ${item.fileName}. Use as setas para mover ou Delete para remover.`;
       case "text":
+        if (item.contractField) {
+          const hint = item.contractField.labelHint
+            ? ` ${item.contractField.labelHint}`
+            : "";
+          if (item.contractField.fieldKind === "checkbox") {
+            return `Caixa de seleção${hint}. Pressione Espaço para marcar, Tab para avançar ou Delete para remover.`;
+          }
+          return `Campo de contrato${hint}. Digite para preencher, Tab para avançar ou Delete para remover.`;
+        }
         return `Texto "${item.text.slice(0, 24)}". Clique duplo para editar ou Delete para remover.`;
       case "redact":
         return `Cobertura e substituição de trecho. Clique duplo para editar texto substituto.`;

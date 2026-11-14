@@ -18,7 +18,8 @@ import {
 import type {
   EditorFontFamily,
   ExportableOverlayItem,
-  OverlayAssetInput
+  OverlayAssetInput,
+  PageOverlayItem
 } from "../types";
 import {
   computeOverlayPdfGeometry,
@@ -213,6 +214,23 @@ function drawTextInsideBox(params: {
   return hadUnsupported;
 }
 
+/**
+ * Returns whether an overlay item should be baked into the exported PDF.
+ * Empty/unchecked contract fields (and completely empty non-tinted text boxes)
+ * are kept only as UI guides and skipped on export.
+ */
+export function isOverlayExportable(
+  overlay: PageOverlayItem | ExportableOverlayItem
+): boolean {
+  if (overlay.kind === "text") {
+    if (overlay.contractField) {
+      return overlay.text.trim().length > 0;
+    }
+    return overlay.text.trim().length > 0 || Boolean(overlay.backgroundColor);
+  }
+  return true;
+}
+
 export async function drawPageOverlays(params: {
   page: PDFPage;
   cropBox: PdfBoxRect;
@@ -228,6 +246,7 @@ export async function drawPageOverlays(params: {
   const rot = normalizeRotation(totalRotation);
 
   for (const overlay of overlays) {
+    if (!isOverlayExportable(overlay)) continue;
     const geom = computeOverlayPdfGeometry(overlay, cropBox, rot);
 
     if (overlay.kind === "highlight") {

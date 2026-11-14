@@ -1,4 +1,11 @@
-import { PAGE_SIZES, type FitMode, type Quality, type Settings } from "../types";
+import {
+  PAGE_SIZES,
+  type ContractFieldMeta,
+  type FitMode,
+  type NormalizedRect,
+  type Quality,
+  type Settings
+} from "../types";
 
 export function normalizeRotation(rotation: number): number {
   return ((rotation % 360) + 360) % 360;
@@ -357,6 +364,34 @@ export function pdfRectToViewerNorm(
   };
 }
 
+function rotateNormRect(
+  rect: NormalizedRect,
+  deltaDeg: 90 | -90,
+  oldPageWidthPt: number,
+  oldPageHeightPt: number
+): NormalizedRect {
+  const safeW = Math.max(1, oldPageWidthPt);
+  const safeH = Math.max(1, oldPageHeightPt);
+  const cx = rect.xNorm + rect.widthNorm / 2;
+  const cy = rect.yNorm + rect.heightNorm / 2;
+
+  const wPt = rect.widthNorm * safeW;
+  const hPt = rect.heightNorm * safeH;
+  // After +/-90 deg rotation, new page dimensions are (safeH, safeW)
+  const nextWidthNorm = Math.min(1.5, Math.max(0.015, wPt / safeH));
+  const nextHeightNorm = Math.min(1.5, Math.max(0.015, hPt / safeW));
+
+  const nextCx = deltaDeg === 90 ? 1 - cy : cy;
+  const nextCy = deltaDeg === 90 ? cx : 1 - cx;
+
+  return {
+    xNorm: nextCx - nextWidthNorm / 2,
+    yNorm: nextCy - nextHeightNorm / 2,
+    widthNorm: nextWidthNorm,
+    heightNorm: nextHeightNorm
+  };
+}
+
 /**
  * Updates normalized viewer box coordinates when the host page rotates by +/- 90 deg,
  * preserving the overlay's point size and anchoring it to the same visual spot on the page.
@@ -367,32 +402,28 @@ export function transformOverlayOnPageRotate<T extends OverlayGeomInput>(
   oldPageWidthPt: number,
   oldPageHeightPt: number
 ): T {
-  const safeW = Math.max(1, oldPageWidthPt);
-  const safeH = Math.max(1, oldPageHeightPt);
-  const cx = overlay.xNorm + overlay.widthNorm / 2;
-  const cy = overlay.yNorm + overlay.heightNorm / 2;
-
-  const wPt = overlay.widthNorm * safeW;
-  const hPt = overlay.heightNorm * safeH;
-  // After +/-90 deg rotation, new page dimensions are (safeH, safeW)
-  const nextWidthNorm = Math.min(1.5, Math.max(0.02, wPt / safeH));
-  const nextHeightNorm = Math.min(1.5, Math.max(0.02, hPt / safeW));
-
-  const nextCx = deltaDeg === 90 ? 1 - cy : cy;
-  const nextCy = deltaDeg === 90 ? cx : 1 - cx;
+  const rotatedBox = rotateNormRect(overlay, deltaDeg, oldPageWidthPt, oldPageHeightPt);
 
   let nextRot = (overlay.rotationDeg + deltaDeg) % 360;
   if (nextRot >= 180) nextRot -= 360;
   if (nextRot < -180) nextRot += 360;
 
-  return {
+  const result: T = {
     ...overlay,
-    xNorm: nextCx - nextWidthNorm / 2,
-    yNorm: nextCy - nextHeightNorm / 2,
-    widthNorm: nextWidthNorm,
-    heightNorm: nextHeightNorm,
+    ...rotatedBox,
     rotationDeg: nextRot
   };
+
+  if ("contractField" in overlay && overlay.contractField) {
+    const cf = overlay.contractField as ContractFieldMeta;
+    (result as T & { contractField?: ContractFieldMeta }).contractField = {
+      ...cf,
+      aboveLineRect: rotateNormRect(cf.aboveLineRect, deltaDeg, oldPageWidthPt, oldPageHeightPt),
+      coverRect: rotateNormRect(cf.coverRect, deltaDeg, oldPageWidthPt, oldPageHeightPt)
+    };
+  }
+
+  return result;
 }
 
 /**

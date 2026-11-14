@@ -23,7 +23,9 @@ import {
   transformOverlayOnPageRotate
 } from "../utils/layout";
 import { PdfMergeController } from "../pdf/pdf-merge-client";
+import { isOverlayExportable } from "../pdf/pdf-overlay-renderer";
 import { extractAcroFormWidgets } from "../editor/acroform-extractor";
+import { detectContractFieldsOnPage } from "../editor/contract-field-detector";
 import {
   dataUrlToAssetBytes,
   nextAssetId,
@@ -224,6 +226,9 @@ export class PdfReaderStudio {
 
   private editorToolbar!: HTMLElement;
   private toolButtons: HTMLButtonElement[] = [];
+  private detectFieldsBtn!: HTMLButtonElement;
+  private detectAllPagesBtn!: HTMLButtonElement;
+  private isDetectingFields = false;
   private imageOverlayInput!: HTMLInputElement;
   private formStatusPill!: HTMLElement;
   private inspectorHost!: HTMLElement;
@@ -342,7 +347,7 @@ export class PdfReaderStudio {
 
       <section id="readerWorkbench" class="reader-workbench" aria-label="Área de leitura e organização de PDF" hidden>
         <div class="reader-toolbar panel" role="toolbar" aria-label="Controles do leitor de PDF">
-          <div class="reader-toolbar-group">
+          <div class="reader-toolbar-group reader-doc-bar">
             <button id="toggleThumbnailsBtn" class="button ghost compact-btn" type="button" aria-expanded="true" aria-controls="readerSidebar" title="Mostrar ou ocultar painel de páginas e organizador">
               ${ICONS.panelLeft}
               <span>Páginas &amp; Organizar</span>
@@ -356,37 +361,41 @@ export class PdfReaderStudio {
           </div>
 
           <div class="reader-toolbar-group reader-nav-controls">
-            <button id="readerPrevPageBtn" class="button ghost icon-only" type="button" aria-label="Página anterior" title="Página anterior (←)">
-              ${ICONS.chevronLeft}
-            </button>
-            <label class="reader-jump-field">
-              <input id="readerPageJumpInput" type="text" inputmode="numeric" pattern="[0-9]*" value="1" aria-label="Ir para o número da página" title="Digite o número da página e pressione Enter" />
-              <span id="readerTotalPagesLabel" class="reader-total-pages">/ 0</span>
-            </label>
-            <button id="readerNextPageBtn" class="button ghost icon-only" type="button" aria-label="Próxima página" title="Próxima página (→)">
-              ${ICONS.chevronRight}
-            </button>
+            <div class="reader-pager-cluster">
+              <button id="readerPrevPageBtn" class="button ghost icon-only" type="button" aria-label="Página anterior" title="Página anterior (←)">
+                ${ICONS.chevronLeft}
+              </button>
+              <label class="reader-jump-field">
+                <input id="readerPageJumpInput" type="text" inputmode="numeric" pattern="[0-9]*" value="1" aria-label="Ir para o número da página" title="Digite o número da página e pressione Enter" />
+                <span id="readerTotalPagesLabel" class="reader-total-pages">/ 0</span>
+              </label>
+              <button id="readerNextPageBtn" class="button ghost icon-only" type="button" aria-label="Próxima página" title="Próxima página (→)">
+                ${ICONS.chevronRight}
+              </button>
+            </div>
 
             <span class="toolbar-sep" aria-hidden="true"></span>
 
-            <button id="readerZoomOutBtn" class="button ghost icon-only" type="button" aria-label="Diminuir zoom" title="Diminuir zoom (-)">
-              ${ICONS.zoomOut}
-            </button>
-            <select id="readerZoomSelect" class="reader-zoom-select" aria-label="Nível de zoom da página">
-              <option value="fit-width">Ajustar largura</option>
-              <option value="fit-page">Ajustar página</option>
-              <option value="0.5">50%</option>
-              <option value="0.75">75%</option>
-              <option value="1">100%</option>
-              <option value="1.25">125%</option>
-              <option value="1.5">150%</option>
-              <option value="2">200%</option>
-              <option value="2.5">250%</option>
-              <option id="readerZoomCustomOpt" value="custom" hidden>100%</option>
-            </select>
-            <button id="readerZoomInBtn" class="button ghost icon-only" type="button" aria-label="Aumentar zoom" title="Aumentar zoom (+)">
-              ${ICONS.zoom}
-            </button>
+            <div class="reader-zoom-cluster">
+              <button id="readerZoomOutBtn" class="button ghost icon-only" type="button" aria-label="Diminuir zoom" title="Diminuir zoom (-)">
+                ${ICONS.zoomOut}
+              </button>
+              <select id="readerZoomSelect" class="reader-zoom-select" aria-label="Nível de zoom da página">
+                <option value="fit-width">Ajustar largura</option>
+                <option value="fit-page">Ajustar página</option>
+                <option value="0.5">50%</option>
+                <option value="0.75">75%</option>
+                <option value="1">100%</option>
+                <option value="1.25">125%</option>
+                <option value="1.5">150%</option>
+                <option value="2">200%</option>
+                <option value="2.5">250%</option>
+                <option id="readerZoomCustomOpt" value="custom" hidden>100%</option>
+              </select>
+              <button id="readerZoomInBtn" class="button ghost icon-only" type="button" aria-label="Aumentar zoom" title="Aumentar zoom (+)">
+                ${ICONS.zoom}
+              </button>
+            </div>
           </div>
 
           <div class="reader-toolbar-group reader-tool-actions">
@@ -434,6 +443,26 @@ export class PdfReaderStudio {
               <span>Destaque</span>
             </button>
             <input id="readerOverlayImageInput" type="file" accept=".png,.jpg,.jpeg,.webp,.avif,.svg,image/*" hidden />
+          </div>
+
+          <div class="detect-fields-group" role="group" aria-label="Detecção de campos de contrato">
+            <button
+              id="readerDetectFieldsBtn"
+              type="button"
+              class="button secondary compact-btn detect-fields-btn"
+              title="Detectar linhas, lacunas e caixas de seleção nesta página"
+            >
+              ${ICONS.scanFields}
+              <span>Detectar campos</span>
+            </button>
+            <button
+              id="readerDetectAllPagesBtn"
+              type="button"
+              class="button ghost compact-btn detect-fields-all-btn"
+              title="Detectar campos de contrato em todas as páginas"
+            >
+              <span>Todas as págs.</span>
+            </button>
           </div>
 
           <span id="readerFormStatusPill" class="reader-form-pill" hidden>
@@ -640,6 +669,8 @@ export class PdfReaderStudio {
     this.toolButtons = Array.from(
       this.editorToolbar.querySelectorAll<HTMLButtonElement>("[data-editor-tool]")
     );
+    this.detectFieldsBtn = this.el("readerDetectFieldsBtn");
+    this.detectAllPagesBtn = this.el("readerDetectAllPagesBtn");
     this.imageOverlayInput = this.el("readerOverlayImageInput");
     this.formStatusPill = this.el("readerFormStatusPill");
     this.inspectorHost = this.el("readerInspectorHost");
@@ -764,7 +795,8 @@ export class PdfReaderStudio {
         }
       },
       onUndo: () => this.undoLastOverlayEdit(),
-      onClearPage: () => this.clearOverlaysOnCurrentPage()
+      onClearPage: () => this.clearOverlaysOnCurrentPage(),
+      onClearEmptyContractFields: () => this.clearEmptyContractFieldsOnCurrentPage()
     });
   }
 
@@ -1002,6 +1034,37 @@ export class PdfReaderStudio {
     this.setStatus("Anotações da página atual removidas.", "info");
   }
 
+  private clearEmptyContractFieldsOnCurrentPage(): void {
+    if (this.selectedPageId === null) return;
+    const pageId = this.selectedPageId;
+    const current = this.pageOverlays.get(pageId) ?? [];
+    const remaining = current.filter(
+      (o) => !(o.kind === "text" && Boolean(o.contractField) && o.text.trim().length === 0)
+    );
+    const removedCount = current.length - remaining.length;
+    if (removedCount === 0) return;
+
+    this.overlayLayer.stopInlineEdit();
+    this.pushUndoSnapshot(pageId, current);
+    if (remaining.length === 0) {
+      this.pageOverlays.delete(pageId);
+    } else {
+      this.pageOverlays.set(pageId, remaining);
+    }
+    if (
+      this.selectedOverlayId &&
+      !remaining.some((o) => o.id === this.selectedOverlayId)
+    ) {
+      this.selectedOverlayId = null;
+    }
+    this.syncEditorUi();
+    this.syncThumbSelectionAndActions();
+    this.setStatus(
+      `${removedCount} ${removedCount === 1 ? "campo vazio descartado" : "campos vazios descartados"} desta página.`,
+      "info"
+    );
+  }
+
   private undoLastOverlayEdit(): void {
     const entry = this.overlayUndoStack.pop();
     if (!entry) return;
@@ -1026,6 +1089,199 @@ export class PdfReaderStudio {
     this.setStatus("Última alteração desfeita.", "info");
   }
 
+  private async detectFieldsOnCurrentPage(): Promise<void> {
+    if (
+      this.pages.length === 0 ||
+      this.selectedPageId === null ||
+      this.isDetectingFields ||
+      this.isExporting
+    ) {
+      return;
+    }
+
+    const pageItem = this.pages.find((p) => p.id === this.selectedPageId);
+    if (!pageItem) return;
+    const source = this.sources.get(pageItem.sourceDocId);
+    if (!source) return;
+
+    const targetPageId = pageItem.id;
+    this.overlayLayer.stopInlineEdit();
+    this.isDetectingFields = true;
+    this.syncEditorUi();
+    this.setStatus("Analisando campos de contrato na página atual...", "info");
+
+    try {
+      const page = await source.pdfDoc.getPage(pageItem.sourcePageNumber);
+      const totalRotation = normalizeRotation(page.rotate + pageItem.userRotation);
+      const existing = this.pageOverlays.get(targetPageId) ?? [];
+      const acroWidgets =
+        this.selectedPageId === targetPageId
+          ? this.currentAcroWidgets
+          : await extractAcroFormWidgets(page, totalRotation);
+      const renderedCanvas =
+        this.selectedPageId === targetPageId &&
+        this.activeRenderTask === null &&
+        this.canvas.width > 0
+          ? this.canvas
+          : null;
+
+      const detected = await detectContractFieldsOnPage({
+        page,
+        totalRotation,
+        existingOverlays: existing,
+        acroWidgets,
+        renderedCanvas
+      });
+
+      if (detected.length === 0) {
+        const existingContractCount = existing.filter(
+          (o) => o.kind === "text" && Boolean(o.contractField)
+        ).length;
+        if (existingContractCount > 0) {
+          if (this.selectedPageId === targetPageId) {
+            this.toolMode = "select";
+            this.syncEditorUi();
+            this.overlayLayer.focusFirstContractField();
+          }
+          this.setStatus(
+            `Nenhum campo novo encontrado; ${existingContractCount} campo(s) já pronto(s) nesta página. Pressione Tab para navegar.`,
+            "info"
+          );
+        } else {
+          this.setStatus(
+            "Nenhuma linha, lacuna ou caixa de seleção detectada nesta página. Use a ferramenta Texto para inserir manualmente.",
+            "info"
+          );
+        }
+        return;
+      }
+
+      this.pushUndoSnapshot(targetPageId, existing);
+      this.pageOverlays.set(targetPageId, [...existing, ...detected]);
+
+      if (this.selectedPageId === targetPageId) {
+        this.toolMode = "select";
+        this.selectedOverlayId = detected[0].id;
+        this.syncEditorUi();
+        this.overlayLayer.focusFirstContractField();
+      }
+      this.syncThumbSelectionAndActions();
+      this.setStatus(
+        `${detected.length} ${detected.length === 1 ? "campo detectado" : "campos detectados"} nesta página. Pressione Tab para avançar entre lacunas.`,
+        "success"
+      );
+    } catch (err) {
+      console.error(err);
+      this.setStatus(
+        "Não foi possível analisar os campos desta página.",
+        "error"
+      );
+    } finally {
+      this.isDetectingFields = false;
+      this.syncEditorUi();
+    }
+  }
+
+  private async detectFieldsOnAllPages(): Promise<void> {
+    if (
+      this.pages.length === 0 ||
+      this.isDetectingFields ||
+      this.isExporting
+    ) {
+      return;
+    }
+
+    const pagesSnapshot = [...this.pages];
+    this.overlayLayer.stopInlineEdit();
+    this.isDetectingFields = true;
+    this.syncEditorUi();
+
+    let totalAdded = 0;
+    let pagesWithFields = 0;
+    let firstAddedOnSelectedId: string | null = null;
+
+    try {
+      for (let i = 0; i < pagesSnapshot.length; i++) {
+        const pageItem = pagesSnapshot[i];
+        const source = this.sources.get(pageItem.sourceDocId);
+        if (!source) continue;
+
+        this.setStatus(
+          `Analisando campos de contrato (${i + 1}/${pagesSnapshot.length})...`,
+          "info"
+        );
+
+        const page = await source.pdfDoc.getPage(pageItem.sourcePageNumber);
+        const totalRotation = normalizeRotation(page.rotate + pageItem.userRotation);
+        const existing = this.pageOverlays.get(pageItem.id) ?? [];
+        const acroWidgets =
+          pageItem.id === this.selectedPageId
+            ? this.currentAcroWidgets
+            : await extractAcroFormWidgets(page, totalRotation);
+        const renderedCanvas =
+          pageItem.id === this.selectedPageId &&
+          this.activeRenderTask === null &&
+          this.canvas.width > 0
+            ? this.canvas
+            : null;
+
+        const detected = await detectContractFieldsOnPage({
+          page,
+          totalRotation,
+          existingOverlays: existing,
+          acroWidgets,
+          renderedCanvas
+        });
+
+        if (detected.length > 0) {
+          this.pushUndoSnapshot(pageItem.id, existing);
+          this.pageOverlays.set(pageItem.id, [...existing, ...detected]);
+          totalAdded += detected.length;
+          pagesWithFields++;
+          if (pageItem.id === this.selectedPageId && !firstAddedOnSelectedId) {
+            firstAddedOnSelectedId = detected[0].id;
+          }
+        }
+
+        if ((i + 1) % 2 === 0) {
+          await new Promise<void>((resolve) => {
+            window.setTimeout(resolve, 0);
+          });
+        }
+      }
+
+      if (totalAdded > 0) {
+        this.toolMode = "select";
+        if (firstAddedOnSelectedId) {
+          this.selectedOverlayId = firstAddedOnSelectedId;
+        }
+        this.syncEditorUi();
+        this.syncThumbSelectionAndActions();
+        if (firstAddedOnSelectedId) {
+          this.overlayLayer.focusFirstContractField();
+        }
+        this.setStatus(
+          `${totalAdded} ${totalAdded === 1 ? "campo detectado" : "campos detectados"} em ${pagesWithFields} ${pagesWithFields === 1 ? "página" : "páginas"}. Pressione Tab para preencher.`,
+          "success"
+        );
+      } else {
+        this.setStatus(
+          "Nenhum campo novo de contrato detectado nas páginas do documento.",
+          "info"
+        );
+      }
+    } catch (err) {
+      console.error(err);
+      this.setStatus(
+        "Erro ao analisar campos de contrato em todas as páginas.",
+        "error"
+      );
+    } finally {
+      this.isDetectingFields = false;
+      this.syncEditorUi();
+    }
+  }
+
   private getCurrentPageOverlays(): PageOverlayItem[] {
     if (this.selectedPageId === null) return [];
     return this.pageOverlays.get(this.selectedPageId) ?? [];
@@ -1036,11 +1292,17 @@ export class PdfReaderStudio {
     const selectedItem =
       overlays.find((o) => o.id === this.selectedOverlayId) ?? null;
 
+    const hasContractFields = overlays.some(
+      (o) => o.kind === "text" && Boolean(o.contractField)
+    );
+
     const hintByTool: Record<EditorToolMode, string> = {
       select:
-        this.currentAcroWidgets.length > 0
-          ? "Modo leitura: clique nos campos azuis do formulário para preencher ou selecione uma ferramenta acima."
-          : "Modo leitura: selecione texto do PDF, pesquise (Ctrl+F) ou escolha uma ferramenta acima para editar.",
+        hasContractFields
+          ? "Campos de contrato prontos: clique para preencher/marcar ou pressione Tab para avançar entre lacunas."
+          : this.currentAcroWidgets.length > 0
+            ? "Modo leitura: clique nos campos azuis do formulário para preencher ou selecione uma ferramenta acima."
+            : "Modo leitura: selecione texto do PDF, pesquise (Ctrl+F) ou escolha uma ferramenta acima para editar.",
       signature: "Escolha ou desenhe uma assinatura.",
       text: "Clique ou arraste sobre a folha para posicionar a caixa de texto.",
       image: "Escolha uma imagem do seu dispositivo.",
@@ -1048,10 +1310,15 @@ export class PdfReaderStudio {
       highlight: "Arraste sobre a região do documento que deseja destacar."
     };
 
+    const emptyContractCount = overlays.filter(
+      (o) => o.kind === "text" && Boolean(o.contractField) && o.text.trim().length === 0
+    ).length;
+
     this.inspectorBar.update({
       selectedItem,
       canUndo: this.overlayUndoStack.length > 0,
       pageOverlayCount: overlays.length,
+      emptyContractCount,
       hintText: hintByTool[this.toolMode]
     });
   }
@@ -1062,7 +1329,23 @@ export class PdfReaderStudio {
       const isCurrent = t === this.toolMode;
       btn.classList.toggle("is-tool-active", isCurrent);
       btn.setAttribute("aria-pressed", String(isCurrent));
-      btn.disabled = this.pages.length === 0 || this.isExporting;
+      btn.disabled =
+        this.pages.length === 0 || this.isExporting || this.isDetectingFields;
+    }
+
+    const detectDisabled =
+      this.pages.length === 0 || this.isExporting || this.isDetectingFields;
+    this.detectFieldsBtn.disabled = detectDisabled;
+    this.detectAllPagesBtn.disabled = detectDisabled || this.pages.length < 2;
+    this.detectFieldsBtn.setAttribute("aria-busy", String(this.isDetectingFields));
+    this.detectAllPagesBtn.setAttribute("aria-busy", String(this.isDetectingFields));
+    this.detectFieldsBtn.classList.toggle("is-busy", this.isDetectingFields);
+    this.detectAllPagesBtn.classList.toggle("is-busy", this.isDetectingFields);
+    const detectSpan = this.detectFieldsBtn.querySelector("span");
+    if (detectSpan) {
+      detectSpan.textContent = this.isDetectingFields
+        ? "Analisando..."
+        : "Detectar campos";
     }
 
     const placing =
@@ -1149,6 +1432,9 @@ export class PdfReaderStudio {
     this.prevPageBtn.addEventListener("click", () => this.stepPage(-1));
     this.nextPageBtn.addEventListener("click", () => this.stepPage(1));
 
+    this.pageJumpInput.addEventListener("input", () =>
+      this.syncPageJumpInputWidth(),
+    );
     this.pageJumpInput.addEventListener("keydown", (event) => {
       if (event.key === "Enter") {
         event.preventDefault();
@@ -1257,6 +1543,14 @@ export class PdfReaderStudio {
         this.setToolMode(mode);
       });
     }
+
+    this.detectFieldsBtn.addEventListener("click", () => {
+      void this.detectFieldsOnCurrentPage();
+    });
+
+    this.detectAllPagesBtn.addEventListener("click", () => {
+      void this.detectFieldsOnAllPages();
+    });
 
     this.imageOverlayInput.addEventListener("change", () => {
       const file = this.imageOverlayInput.files?.[0];
@@ -1756,9 +2050,18 @@ export class PdfReaderStudio {
     const raw = parseInt(this.pageJumpInput.value.trim(), 10);
     if (!Number.isFinite(raw) || Number.isNaN(raw)) {
       this.pageJumpInput.value = String(this.getSelectedPageIndex() + 1);
+      this.syncPageJumpInputWidth();
       return;
     }
     this.selectPageByIndex(raw - 1);
+  }
+
+  private syncPageJumpInputWidth(): void {
+    const digits = Math.min(
+      5,
+      Math.max(1, this.pageJumpInput.value.trim().length),
+    );
+    this.pageJumpInput.style.width = `${digits}ch`;
   }
 
   private stepZoom(direction: -1 | 1): void {
@@ -2325,9 +2628,17 @@ export class PdfReaderStudio {
     if (numEl) {
       const rotBadge =
         item.userRotation !== 0 ? ` · ${item.userRotation}°` : "";
-      const editCount = this.pageOverlays.get(item.id)?.length ?? 0;
+      const pageOvs = this.pageOverlays.get(item.id) ?? [];
+      const editCount = pageOvs.filter((ov) => isOverlayExportable(ov)).length;
+      const pendingContractCount = pageOvs.filter(
+        (ov) => ov.kind === "text" && Boolean(ov.contractField) && !isOverlayExportable(ov)
+      ).length;
       const editBadge =
-        editCount > 0 ? ` · ${editCount} ${editCount === 1 ? "ed." : "eds."}` : "";
+        editCount > 0
+          ? ` · ${editCount} ${editCount === 1 ? "ed." : "eds."}`
+          : pendingContractCount > 0
+            ? ` · ${pendingContractCount} ${pendingContractCount === 1 ? "campo" : "campos"}`
+            : "";
       numEl.textContent = `Pág. ${String(index + 1).padStart(2, "0")}${rotBadge}${editBadge}`;
     }
     if (srcEl) {
@@ -2486,6 +2797,7 @@ export class PdfReaderStudio {
     this.nextPageBtn.disabled = !hasPages || currentIdx >= total - 1;
     this.pageJumpInput.disabled = !hasPages;
     this.pageJumpInput.value = hasPages ? String(currentIdx + 1) : "0";
+    this.syncPageJumpInputWidth();
     this.totalPagesLabel.textContent = `/ ${total}`;
 
     this.zoomOutBtn.disabled = !hasPages;
@@ -2500,8 +2812,14 @@ export class PdfReaderStudio {
     this.exportBtn.disabled = !hasPages || this.isExporting;
     this.flattenOutputCheck.disabled = !hasPages || this.isExporting;
 
-    const hasEdits =
-      this.pageOverlays.size > 0 || this.formValuesByDoc.size > 0;
+    let hasExportableOverlays = false;
+    for (const list of this.pageOverlays.values()) {
+      if (list.some((ov) => isOverlayExportable(ov))) {
+        hasExportableOverlays = true;
+        break;
+      }
+    }
+    const hasEdits = hasExportableOverlays || this.formValuesByDoc.size > 0;
     const exportBtnSpan = this.exportBtn.querySelector("span");
     if (exportBtnSpan) {
       exportBtnSpan.textContent = hasEdits
@@ -2683,7 +3001,9 @@ export class PdfReaderStudio {
     const exportAssetsMap = new Map<string, OverlayAssetInput>();
 
     const mergePages: MergePageInput[] = this.pages.map((p) => {
-      const pageOvList = this.pageOverlays.get(p.id) ?? [];
+      const pageOvList = (this.pageOverlays.get(p.id) ?? []).filter((ov) =>
+        isOverlayExportable(ov)
+      );
       const exportOverlays: ExportableOverlayItem[] = pageOvList.map((ov) => {
         if (ov.kind === "signature" || ov.kind === "image") {
           if (!exportAssetsMap.has(ov.assetId)) {
