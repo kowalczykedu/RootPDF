@@ -12,6 +12,7 @@ export interface InspectorCallbacks {
   onDeleteSelected: () => void;
   onUndo: () => void;
   onClearPage?: () => void;
+  onClearEmptyContractFields?: () => void;
 }
 
 const FONT_SIZE_PRESETS = [9, 10, 11, 12, 14, 16, 18, 22, 26, 32, 42, 56];
@@ -27,6 +28,7 @@ export class OverlayInspectorBar {
   private activeItem: PageOverlayItem | null = null;
   private canUndo = false;
   private pageOverlayCount = 0;
+  private emptyContractCount = 0;
   private hintText = "";
 
   constructor(host: HTMLElement, callbacks: InspectorCallbacks) {
@@ -41,11 +43,13 @@ export class OverlayInspectorBar {
     selectedItem: PageOverlayItem | null;
     canUndo: boolean;
     pageOverlayCount: number;
+    emptyContractCount?: number;
     hintText?: string;
   }): void {
     this.activeItem = params.selectedItem;
     this.canUndo = params.canUndo;
     this.pageOverlayCount = params.pageOverlayCount;
+    this.emptyContractCount = params.emptyContractCount ?? 0;
     this.hintText = params.hintText ?? "";
     this.render();
   }
@@ -59,6 +63,14 @@ export class OverlayInspectorBar {
           ${ICONS.undo}
           <span>Desfazer</span>
         </button>
+        ${
+          this.callbacks.onClearEmptyContractFields && this.emptyContractCount > 0
+            ? `<button type="button" class="button ghost compact-btn" data-insp-cmd="clear-empty-contract" title="Remover guias de contrato ainda vazias nesta página">
+                ${ICONS.eraser}
+                <span>Descartar vazios (${this.emptyContractCount})</span>
+              </button>`
+            : ""
+        }
         ${
           this.callbacks.onClearPage
             ? `<button type="button" class="button ghost compact-btn danger-hover" data-insp-cmd="clear-page" ${this.pageOverlayCount > 0 ? "" : "disabled"} title="Remover todas as anotações desta página">
@@ -86,23 +98,60 @@ export class OverlayInspectorBar {
       const textVal = item.kind === "redact" ? item.replacementText : item.text;
       const textColor = item.kind === "redact" ? item.textColor : item.color;
       const hasUnicodeWarn = sanitizeWinAnsiText(textVal).hadUnsupported;
+      const contractMeta = item.kind === "text" ? item.contractField : undefined;
+      const isContractCheckbox = contractMeta?.fieldKind === "checkbox";
+      const roundedPt = Math.max(6, Math.round(item.fontSizePt));
+      const sizeOptions = FONT_SIZE_PRESETS.includes(roundedPt)
+        ? FONT_SIZE_PRESETS
+        : [...FONT_SIZE_PRESETS, roundedPt].sort((a, b) => a - b);
+
+      let bgOrContractHtml = "";
+      if (item.kind === "redact") {
+        bgOrContractHtml = `<label class="insp-field" title="Cor de cobertura sobre o texto antigo">
+          <span>Cobertura</span>
+          <input type="color" value="${item.coverColor}" data-insp-prop="coverColor" aria-label="Cor da tarja de cobertura" />
+        </label>`;
+      } else if (isContractCheckbox) {
+        const isChecked = item.text.trim() !== "";
+        bgOrContractHtml = `<button type="button" class="button secondary compact-btn ${isChecked ? "is-selected" : ""}" data-insp-cmd="toggle-check" aria-pressed="${isChecked}" title="Alternar marcação da caixa (Enter ou Espaço)">
+          ${ICONS.checkSquare}
+          <span>Marcar (X)</span>
+        </button>`;
+      } else if (contractMeta) {
+        const coverHex =
+          /^#[0-9a-f]{6}$/i.test(item.backgroundColor ?? "")
+            ? (item.backgroundColor as string)
+            : /^#[0-9a-f]{6}$/i.test(contractMeta.sampledBgColor)
+              ? contractMeta.sampledBgColor
+              : "#ffffff";
+        bgOrContractHtml = `<label class="insp-field" title="Posicionamento em relação à linha detectada">
+            <span>Lacuna</span>
+            <select data-insp-prop="contractCoverMode" aria-label="Modo de preenchimento na lacuna">
+              <option value="above" ${!contractMeta.coverSource ? "selected" : ""}>Acima da linha</option>
+              <option value="cover" ${contractMeta.coverSource ? "selected" : ""}>Cobrir lacuna</option>
+            </select>
+          </label>
+          ${
+            contractMeta.coverSource
+              ? `<label class="insp-field" title="Cor de cobertura sobre a lacuna">
+                  <span>Cobrir</span>
+                  <input type="color" value="${coverHex}" data-insp-prop="contractCoverColor" aria-label="Cor de cobertura da lacuna" />
+                </label>`
+              : ""
+          }`;
+      } else {
+        bgOrContractHtml = `<label class="insp-field" title="Fundo da caixa de texto">
+          <span>Fundo</span>
+          <select data-insp-prop="textBgMode" aria-label="Fundo da caixa de texto">
+            <option value="none" ${!item.backgroundColor ? "selected" : ""}>Transparente</option>
+            <option value="#ffffff" ${item.backgroundColor === "#ffffff" ? "selected" : ""}>Branco</option>
+            <option value="#fef3c7" ${item.backgroundColor === "#fef3c7" ? "selected" : ""}>Creme</option>
+          </select>
+        </label>`;
+      }
 
       propsHtml = `
-        ${
-          item.kind === "redact"
-            ? `<label class="insp-field" title="Cor de cobertura sobre o texto antigo">
-                <span>Cobertura</span>
-                <input type="color" value="${item.coverColor}" data-insp-prop="coverColor" aria-label="Cor da tarja de cobertura" />
-              </label>`
-            : `<label class="insp-field" title="Fundo da caixa de texto">
-                <span>Fundo</span>
-                <select data-insp-prop="textBgMode" aria-label="Fundo da caixa de texto">
-                  <option value="none" ${!item.backgroundColor ? "selected" : ""}>Transparente</option>
-                  <option value="#ffffff" ${item.backgroundColor === "#ffffff" ? "selected" : ""}>Branco</option>
-                  <option value="#fef3c7" ${item.backgroundColor === "#fef3c7" ? "selected" : ""}>Creme</option>
-                </select>
-              </label>`
-        }
+        ${bgOrContractHtml}
         <label class="insp-field">
           <span>Fonte</span>
           <select data-insp-prop="fontFamily" aria-label="Família tipográfica">
@@ -114,9 +163,9 @@ export class OverlayInspectorBar {
         <label class="insp-field">
           <span>Tam.</span>
           <select data-insp-prop="fontSizePt" aria-label="Tamanho da fonte em pontos">
-            ${FONT_SIZE_PRESETS.map(
+            ${sizeOptions.map(
               (sz) =>
-                `<option value="${sz}" ${Math.round(item.fontSizePt) === sz ? "selected" : ""}>${sz} pt</option>`
+                `<option value="${sz}" ${roundedPt === sz ? "selected" : ""}>${sz} pt</option>`
             ).join("")}
           </select>
         </label>
@@ -197,9 +246,16 @@ export class OverlayInspectorBar {
       if (cmdBtn) {
         const cmd = cmdBtn.dataset.inspCmd;
         if (cmd === "undo") this.callbacks.onUndo();
+        else if (cmd === "clear-empty-contract") {
+          this.callbacks.onClearEmptyContractFields?.();
+        }
         else if (cmd === "clear-page") this.callbacks.onClearPage?.();
         else if (cmd === "delete") this.callbacks.onDeleteSelected();
         else if (cmd === "edit-text") this.callbacks.onStartEditSelected();
+        else if (cmd === "toggle-check" && this.activeItem?.kind === "text") {
+          const isChecked = this.activeItem.text.trim() !== "";
+          this.callbacks.onPatchSelected({ text: isChecked ? "" : "X" }, true);
+        }
         return;
       }
 
@@ -242,6 +298,47 @@ export class OverlayInspectorBar {
     } else if (prop === "textBgMode") {
       this.callbacks.onPatchSelected(
         { backgroundColor: el.value === "none" ? null : el.value },
+        commit
+      );
+    } else if (
+      prop === "contractCoverMode" &&
+      this.activeItem?.kind === "text" &&
+      this.activeItem.contractField
+    ) {
+      const cover = el.value === "cover";
+      const meta = this.activeItem.contractField;
+      const targetRect = cover ? meta.coverRect : meta.aboveLineRect;
+      const bg = cover
+        ? (this.activeItem.backgroundColor ?? meta.sampledBgColor)
+        : null;
+      this.callbacks.onPatchSelected(
+        {
+          xNorm: targetRect.xNorm,
+          yNorm: targetRect.yNorm,
+          widthNorm: targetRect.widthNorm,
+          heightNorm: targetRect.heightNorm,
+          backgroundColor: bg,
+          contractField: {
+            ...meta,
+            coverSource: cover
+          }
+        },
+        commit
+      );
+    } else if (
+      prop === "contractCoverColor" &&
+      this.activeItem?.kind === "text" &&
+      this.activeItem.contractField
+    ) {
+      this.callbacks.onPatchSelected(
+        {
+          backgroundColor: el.value,
+          contractField: {
+            ...this.activeItem.contractField,
+            sampledBgColor: el.value,
+            coverSource: true
+          }
+        },
         commit
       );
     } else if (prop === "opacityPct") {

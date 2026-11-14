@@ -198,6 +198,28 @@ export interface ImageOverlayItem extends OverlayBase {
   opacity: number;
 }
 
+export type ContractFieldKind = "line" | "underline" | "checkbox";
+
+export interface NormalizedRect {
+  xNorm: number;
+  yNorm: number;
+  widthNorm: number;
+  heightNorm: number;
+}
+
+export interface ContractFieldMeta {
+  fieldKind: ContractFieldKind;
+  labelHint?: string;
+  /** Normalized rect positioned right above the black line (keeps original line visible) */
+  aboveLineRect: NormalizedRect;
+  /** Normalized rect covering the original gap/underscores */
+  coverRect: NormalizedRect;
+  /** Sampled paper background color around the gap */
+  sampledBgColor: string;
+  /** Whether the field covers the underlying gap or sits above the line */
+  coverSource: boolean;
+}
+
 export interface TextOverlayItem extends OverlayBase {
   kind: "text";
   text: string;
@@ -208,6 +230,7 @@ export interface TextOverlayItem extends OverlayBase {
   italic: boolean;
   align: EditorTextAlign;
   backgroundColor: string | null;
+  contractField?: ContractFieldMeta;
 }
 
 export interface RedactOverlayItem extends OverlayBase {

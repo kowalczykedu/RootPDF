@@ -1,46 +1,54 @@
 /**
- * Procedural Botanical Root System — Rosé Pine Edition
- * Generates a unique, high-density organic root silhouette on every session,
- * featuring a massive root crown behind `.brand-mark`, proximal anastomosis
- * (interlocking root bridges), tapered polygonal segments with webbed collars,
- * gnarled S-curves, needle-fine capillary rootlets, and long diagonal taproots
- * sweeping 88%–98% across the viewport diagonal.
+ * Procedural Botanical Root System — Rosé Pine Edition (Spec 05)
+ * Generates a unique, seam-free organic root network emerging flush from a
+ * random viewport corner vertex on each session load:
+ * - Continuous closed Bezier ribbons (zero overlapping joint circles/blobs)
+ * - Wide lateral branching sweeping across the entire viewport from base to mid
+ * - Needle-sharp distal & live growing tips tapering smoothly to r = 0
+ * - 4.0s cinematic multi-wave growth with incremental offscreen baking
+ * - Single unified GPU CSS opacity pulse across all roots after settling (0% JS CPU)
  */
 
-interface RootSegment {
-  step: number;
-  x1: number;
-  y1: number;
-  cx: number;
-  cy: number;
-  x2: number;
-  y2: number;
-  r1: number;
-  r2: number;
-  a1: number;
-  a2: number;
-  color: string;
-  alpha: number;
+type CornerId = "top-left" | "top-right" | "bottom-left" | "bottom-right";
+
+interface BranchNode {
+  x: number;
+  y: number;
+  r: number;
+  angle: number;
+  normDist: number;
 }
 
-interface ActiveTip {
+interface RootBranch {
+  id: number;
+  generation: number;
+  isLeader: boolean;
+  isCapillary: boolean;
+  isBridge: boolean;
+  startPhase: number;
+  endPhase: number;
+  nodes: BranchNode[];
+  baked: boolean;
+}
+
+interface BranchSeedSpec {
   x: number;
   y: number;
   angle: number;
   targetAngle: number;
   angularVel: number;
   thickness: number;
-  collarScale: number;
-  step: number;
-  stepsSinceSplit: number;
-  nextSplitAt: number;
+  maxParentRadius: number;
   generation: number;
   splitCount: number;
+  splitWait: number;
   trunkId: number;
   seed: number;
   isLeader: boolean;
   isCapillary: boolean;
   maxSteps: number;
+  startPhase: number;
+  endPhase: number;
 }
 
 interface TrunkAnchor {
@@ -49,7 +57,33 @@ interface TrunkAnchor {
   step: number;
   trunkId: number;
   thickness: number;
+  phase: number;
 }
+
+interface OriginMetrics {
+  width: number;
+  height: number;
+  originX: number;
+  originY: number;
+  targetX: number;
+  targetY: number;
+  diagAngle: number;
+  maxDiagonal: number;
+}
+
+interface ActivePoint {
+  x: number;
+  y: number;
+  r: number;
+  normDist: number;
+}
+
+const CORNERS: readonly CornerId[] = [
+  "top-left",
+  "top-right",
+  "bottom-left",
+  "bottom-right"
+];
 
 const RGB_ROSE: [number, number, number] = [235, 188, 186]; // #ebbcba
 const RGB_IRIS: [number, number, number] = [196, 167, 231]; // #c4a7e7
@@ -60,8 +94,12 @@ function lerp(a: number, b: number, t: number): number {
   return a + (b - a) * t;
 }
 
+function clamp(value: number, min: number, max: number): number {
+  return Math.max(min, Math.min(max, value));
+}
+
 function interpolateRootColor(normalizedDist: number): string {
-  const t = Math.max(0, Math.min(1, normalizedDist));
+  const t = clamp(normalizedDist, 0, 1);
   let c1: [number, number, number];
   let c2: [number, number, number];
   let localT: number;
@@ -87,8 +125,8 @@ function interpolateRootColor(normalizedDist: number): string {
 }
 
 /**
- * Mulberry32 PRNG seeded per session so every load produces a unique
- * botanical root network while remaining stable across viewport resizes.
+ * Mulberry32 PRNG seeded once per session so every load chooses a fresh
+ * corner and organic geometry while remaining stable on viewport resize.
  */
 function createRng(initialSeed: number): () => number {
   let s = initialSeed >>> 0;
@@ -101,637 +139,830 @@ function createRng(initialSeed: number): () => number {
 }
 
 /**
- * Generates a multi-segment sinuous anastomosis bridge connecting two thick
- * proximal trunks to form the characteristic hollow root islands near the crown.
+ * Guarantees a botanical needle tip (radius -> 0) over the distal end of any
+ * non-bridge branch so no branch ever terminates with a blunt/square cut.
  */
-function emitAnastomosisBridge(
-  segments: RootSegment[],
+function applyNeedleTaper(nodes: BranchNode[], isBridge: boolean): void {
+  if (isBridge || nodes.length < 2) return;
+
+  if (nodes.length < 4) {
+    const last = nodes.length - 1;
+    for (let i = 1; i <= last; i++) {
+      const t = i / last;
+      nodes[i].r *= Math.pow(1 - t, 1.35);
+    }
+    nodes[last].r = 0;
+    return;
+  }
+
+  const taperCount = Math.min(
+    nodes.length - 1,
+    Math.max(4, Math.min(18, Math.floor(nodes.length * 0.28)))
+  );
+  const startIdx = nodes.length - 1 - taperCount;
+
+  for (let k = 0; k <= taperCount; k++) {
+    const idx = startIdx + k;
+    const t = k / taperCount;
+    nodes[idx].r *= Math.pow(1 - t, 1.45);
+  }
+  nodes[nodes.length - 1].r = 0;
+}
+
+/**
+ * Builds a sinuous anastomosis bridge fusing two proximal trunks.
+ */
+function buildAnastomosisBridge(
+  branchId: number,
   rng: () => number,
-  xStart: number,
-  yStart: number,
-  xEnd: number,
-  yEnd: number,
-  startStep: number,
-  bridgeThickness: number,
+  anchorA: TrunkAnchor,
+  anchorB: TrunkAnchor,
   originX: number,
   originY: number,
   maxDiagonal: number
-): void {
-  const dist = Math.hypot(xEnd - xStart, yEnd - yStart);
-  const steps = Math.max(3, Math.min(6, Math.round(dist / 16)));
-  const baseAngle = Math.atan2(yEnd - yStart, xEnd - xStart);
+): RootBranch {
+  const dist = Math.hypot(anchorB.x - anchorA.x, anchorB.y - anchorA.y);
+  const stepCount = Math.max(5, Math.min(9, Math.round(dist / 12)));
+  const baseAngle = Math.atan2(anchorB.y - anchorA.y, anchorB.x - anchorA.x);
   const perpX = -Math.sin(baseAngle);
   const perpY = Math.cos(baseAngle);
   const archSign = rng() < 0.5 ? 1 : -1;
   const archAmp = dist * (0.12 + rng() * 0.14) * archSign;
 
-  let prevX = xStart;
-  let prevY = yStart;
-  let prevAngle = baseAngle + archSign * 0.28;
+  const bridgeThickness = Math.min(
+    8.4,
+    Math.max(
+      3.5,
+      Math.min(anchorA.thickness, anchorB.thickness) * (0.4 + rng() * 0.14)
+    )
+  );
+  const halfBase = bridgeThickness * 0.5;
+  const maxEndA = anchorA.thickness * 0.38;
+  const maxEndB = anchorB.thickness * 0.38;
 
-  for (let i = 1; i <= steps; i++) {
-    const t = i / steps;
-    const midT = (i - 0.5) / steps;
-
+  const nodes: BranchNode[] = [];
+  for (let i = 0; i <= stepCount; i++) {
+    const t = i / stepCount;
     const archOffset = Math.sin(t * Math.PI) * archAmp;
-    const midArchOffset = Math.sin(midT * Math.PI) * archAmp;
+    const x = lerp(anchorA.x, anchorB.x, t) + perpX * archOffset;
+    const y = lerp(anchorA.y, anchorB.y, t) + perpY * archOffset;
 
-    const nx = lerp(xStart, xEnd, t) + perpX * archOffset;
-    const ny = lerp(yStart, yEnd, t) + perpY * archOffset;
-    const cx = lerp(xStart, xEnd, midT) + perpX * midArchOffset * 1.08;
-    const cy = lerp(yStart, yEnd, midT) + perpY * midArchOffset * 1.08;
+    const waist = 1 - 0.26 * Math.sin(t * Math.PI);
+    let r = halfBase * waist;
+    if (i === 0) r = Math.min(r * 1.12, maxEndA);
+    if (i === stepCount) r = Math.min(r * 1.12, maxEndB);
 
-    const nextAngle = Math.atan2(ny - prevY, nx - prevX);
+    const d = Math.hypot(x - originX, y - originY);
+    const angle =
+      i === 0
+        ? baseAngle
+        : Math.atan2(y - nodes[i - 1].y, x - nodes[i - 1].x);
 
-    // Flared at both ends where the bridge fuses into the parent trunks, thinner in the middle
-    const waistFactor1 = 1 - 0.24 * Math.sin(((i - 1) / steps) * Math.PI);
-    const waistFactor2 = 1 - 0.24 * Math.sin(t * Math.PI);
-    const collarBoost1 = i === 1 ? 1.22 : 1.0;
-    const collarBoost2 = i === steps ? 1.22 : 1.0;
-
-    const r1 = (bridgeThickness * 0.5) * waistFactor1 * collarBoost1;
-    const r2 = (bridgeThickness * 0.5) * waistFactor2 * collarBoost2;
-
-    const d = Math.hypot(nx - originX, ny - originY);
-    const color = interpolateRootColor(d / maxDiagonal);
-
-    segments.push({
-      step: startStep + i,
-      x1: prevX,
-      y1: prevY,
-      cx,
-      cy,
-      x2: nx,
-      y2: ny,
-      r1,
-      r2,
-      a1: prevAngle,
-      a2: nextAngle,
-      color,
-      alpha: 0.92
+    nodes.push({
+      x,
+      y,
+      r,
+      angle,
+      normDist: d / maxDiagonal
     });
-
-    prevX = nx;
-    prevY = ny;
-    prevAngle = nextAngle;
   }
+
+  const startPhase = clamp(
+    Math.max(anchorA.phase, anchorB.phase),
+    0.12,
+    0.72
+  );
+  const endPhase = clamp(startPhase + 0.15 + rng() * 0.1, startPhase + 0.08, 0.84);
+
+  return {
+    id: branchId,
+    generation: 1,
+    isLeader: false,
+    isCapillary: false,
+    isBridge: true,
+    startPhase,
+    endPhase,
+    nodes,
+    baked: false
+  };
 }
 
 function buildRootNetwork(
-  width: number,
-  height: number,
-  originX: number,
-  originY: number,
+  metrics: OriginMetrics,
   sessionSeed: number
-): { segments: RootSegment[]; maxStep: number } {
+): RootBranch[] {
+  const { width, height, originX, originY, diagAngle, maxDiagonal } = metrics;
+
   const rng = createRng(sessionSeed);
-  const segments: RootSegment[] = [];
-  const maxDiagonal = Math.hypot(width - originX, height - originY) || 1;
-  const diagAngle = Math.atan2(height - originY, width - originX);
+  const isCompact = Math.min(width, height) < 680;
+  const maxTotalNodes = isCompact ? 4200 : 7600;
+  const viewportScale = Math.max(0.75, maxDiagonal / 1350);
+  const trunkScale = Math.min(1.26, Math.pow(viewportScale, 0.35));
 
-  // Proportional scale factor so large desktop viewports get long, sweeping diagonal reach
-  const viewportScale = Math.max(1, maxDiagonal / 1350);
-  const trunkScale = Math.min(1.25, Math.pow(viewportScale, 0.35));
+  const branches: RootBranch[] = [];
+  const pendingSpecs: BranchSeedSpec[] = [];
+  const trunkAnchors: TrunkAnchor[] = [];
 
-  // 8 primary trunks (14px to 22px base thickness) fanning out from the root collar behind .brand-mark
+  let nextBranchId = 1;
+  let totalNodes = 0;
+  let bridgesCreated = 0;
+  const maxBridges = isCompact ? 12 : 18;
+
+  // 10 primary trunks fanning widely (-0.68..+0.68 rad) across the full corner quadrant
   const trunkProfiles = [
-    // Upper-right lateral sweeping trunks (along top/hero toward right side)
-    { angleOffset: -0.46, thickness: 14.8, splitWait: 7 },
-    { angleOffset: -0.28, thickness: 17.6, splitWait: 8 },
-    { angleOffset: -0.13, thickness: 19.8, splitWait: 8 },
-    // Central massive diagonal taproots (sweeping all the way to bottom-right corner)
-    { angleOffset: -0.02, thickness: 22.0, splitWait: 9 },
-    { angleOffset: 0.07, thickness: 21.0, splitWait: 9 },
-    { angleOffset: 0.20, thickness: 18.8, splitWait: 8 },
-    // Lower-diagonal & steeper left-ward trunks
-    { angleOffset: 0.38, thickness: 16.8, splitWait: 8 },
-    { angleOffset: 0.58, thickness: 15.0, splitWait: 7 }
+    { angleOffset: -0.68, thickness: 15.0, splitWait: 4, maxSteps: isCompact ? 88 : 118 },
+    { angleOffset: -0.52, thickness: 18.2, splitWait: 4, maxSteps: isCompact ? 96 : 126 },
+    { angleOffset: -0.36, thickness: 20.4, splitWait: 5, maxSteps: isCompact ? 102 : 134 },
+    { angleOffset: -0.2, thickness: 22.0, splitWait: 5, maxSteps: isCompact ? 108 : 142 },
+    { angleOffset: -0.06, thickness: 23.2, splitWait: 6, maxSteps: isCompact ? 112 : 148 },
+    { angleOffset: 0.07, thickness: 22.8, splitWait: 6, maxSteps: isCompact ? 112 : 148 },
+    { angleOffset: 0.21, thickness: 21.4, splitWait: 5, maxSteps: isCompact ? 108 : 142 },
+    { angleOffset: 0.37, thickness: 19.6, splitWait: 5, maxSteps: isCompact ? 102 : 134 },
+    { angleOffset: 0.53, thickness: 17.8, splitWait: 4, maxSteps: isCompact ? 96 : 126 },
+    { angleOffset: 0.68, thickness: 14.8, splitWait: 4, maxSteps: isCompact ? 88 : 118 }
   ];
 
-  const queue: ActiveTip[] = trunkProfiles.map((profile, idx) => {
-    const jitterAngle = (rng() - 0.5) * 0.06;
-    const startAngle = diagAngle + profile.angleOffset + jitterAngle;
-    const startThickness = profile.thickness * trunkScale * (0.94 + rng() * 0.14);
-    // Offset initial positions slightly around the collar so they coalesce into a massive crown
-    const offsetRadius = (idx - 3.5) * 2.2;
-    const perpAngle = diagAngle + Math.PI * 0.5;
+  trunkProfiles.forEach((profile, idx) => {
+    const jitter = (rng() - 0.5) * 0.05;
+    const startAngle = diagAngle + profile.angleOffset + jitter;
+    const startThickness =
+      profile.thickness * trunkScale * (0.94 + rng() * 0.14);
 
-    return {
-      x: originX + Math.cos(perpAngle) * offsetRadius,
-      y: originY + Math.sin(perpAngle) * offsetRadius,
+    // Anchor seamlessly right inside the screen corner vertex along each ray
+    pendingSpecs.push({
+      x: originX,
+      y: originY,
       angle: startAngle,
       targetAngle: startAngle + (rng() - 0.5) * 0.06,
-      angularVel: (rng() - 0.5) * 0.06,
+      angularVel: (rng() - 0.5) * 0.045,
       thickness: startThickness,
-      collarScale: 1.24,
-      step: idx % 3,
-      stepsSinceSplit: 0,
-      nextSplitAt: profile.splitWait + Math.floor(rng() * 4),
+      maxParentRadius: 32,
       generation: 0,
       splitCount: 0,
+      splitWait: profile.splitWait,
       trunkId: idx,
       seed: rng() * 200,
       isLeader: true,
       isCapillary: false,
-      maxSteps: 320
-    };
+      maxSteps: profile.maxSteps,
+      startPhase: idx * 0.011,
+      endPhase: 0.49 + rng() * 0.08
+    });
   });
 
-  const trunkAnchors: TrunkAnchor[] = [];
-  let bridgesCreated = 0;
-  const maxBridges = 12;
-  const maxSegments = 6500;
-  let maxStep = 0;
+  const outPad = 38;
+  const edgePadX = Math.max(24, width * 0.035);
+  const edgePadY = Math.max(24, height * 0.035);
 
-  while (queue.length > 0 && segments.length < maxSegments) {
-    const tip = queue.shift()!;
+  while (pendingSpecs.length > 0 && totalNodes < maxTotalNodes) {
+    const spec = pendingSpecs.shift()!;
 
-    // Reserve final segment budget exclusively for leader taproots so they never get cut short
-    if (!tip.isLeader && segments.length >= maxSegments - 550) {
+    if (!spec.isLeader && totalNodes >= maxTotalNodes - 420) {
       continue;
     }
 
-    if (
-      tip.thickness < 0.15 ||
-      tip.step > tip.maxSteps ||
-      tip.x < -40 ||
-      tip.x > width - 8 ||
-      tip.y < -40 ||
-      tip.y > height - 8
-    ) {
-      continue;
-    }
+    const nodes: BranchNode[] = [];
+    const deferredForks: Array<{
+      nodeIndex: number;
+      angle: number;
+      targetAngle: number;
+      angularVel: number;
+      thickness: number;
+      maxParentRadius: number;
+      generation: number;
+      splitCount: number;
+      splitWait: number;
+      trunkId: number;
+      seed: number;
+      isLeader: boolean;
+      isCapillary: boolean;
+      maxSteps: number;
+    }> = [];
 
-    // Soft viewport-margin steering for leader trunks so they sweep toward the bottom-right region
-    if (tip.isLeader) {
-      const marginX = width * 0.05;
-      const marginY = height * 0.05;
-      if (tip.x > width - marginX || tip.y > height - marginY || tip.x < marginX || tip.y < marginY) {
-        const cornerAngle = Math.atan2(height * 0.92 - tip.y, width * 0.92 - tip.x);
-        tip.targetAngle = lerp(tip.targetAngle, cornerAngle, 0.32);
-      }
-    }
+    let x = spec.x;
+    let y = spec.y;
+    let angle = spec.angle;
+    let targetAngle = spec.targetAngle;
+    let angularVel = spec.angularVel;
+    let thickness = spec.thickness;
+    let stepsSinceSplit = 0;
+    let nextSplitAt = spec.splitWait + Math.floor(rng() * 3);
 
-    // Step length scales with root thickness and viewport diagonal
-    const thicknessNorm = Math.min(1, tip.thickness / (18.0 * trunkScale));
-    const baseStepLen = tip.isCapillary
-      ? lerp(4.5, 9.5, Math.min(1, tip.thickness / 2.2)) * Math.pow(viewportScale, 0.7)
-      : lerp(9.0, 21.0, Math.pow(thicknessNorm, 0.55)) * viewportScale;
-    const stepLength = baseStepLen * (0.88 + rng() * 0.24);
+    const startRadius = Math.min(spec.maxParentRadius, thickness * 0.5);
+    const startDist = Math.hypot(x - originX, y - originY);
 
-    // Gnarled S-curves: multi-frequency harmonic wave + organic kinks
-    const sCurveWave =
-      Math.sin(tip.step * 0.24 + tip.seed) * 0.072 +
-      Math.cos(tip.step * 0.12 - tip.seed * 0.6) * 0.052;
-
-    // Occasional sudden botanical kink/bend like roots navigating around stones
-    const kink = rng() < 0.15 ? (rng() - 0.5) * (tip.isLeader ? 0.18 : 0.24) : 0;
-    const pullStrength = tip.isLeader ? 0.11 : tip.isCapillary ? 0.03 : 0.065;
-    const anglePull = (tip.targetAngle - tip.angle) * pullStrength;
-
-    tip.angularVel =
-      tip.angularVel * 0.76 +
-      (rng() - 0.5) * (tip.isCapillary ? 0.14 : 0.08) +
-      sCurveWave * 0.46 +
-      kink +
-      anglePull;
-
-    const maxTurn = tip.isCapillary ? 0.34 : tip.isLeader ? 0.20 : 0.25;
-    tip.angularVel = Math.max(-maxTurn, Math.min(maxTurn, tip.angularVel));
-
-    const prevAngle = tip.angle;
-    const nextAngle = tip.angle + tip.angularVel;
-    const midAngle = prevAngle + tip.angularVel * 0.5 + (rng() - 0.5) * 0.1;
-
-    const x2 = tip.x + Math.cos(nextAngle) * stepLength;
-    const y2 = tip.y + Math.sin(nextAngle) * stepLength;
-    const cx = tip.x + Math.cos(midAngle) * (stepLength * 0.54);
-    const cy = tip.y + Math.sin(midAngle) * (stepLength * 0.54);
-
-    const dist = Math.hypot(x2 - originX, y2 - originY);
-    const normDist = dist / maxDiagonal;
-
-    // Botanical conservation: leader taproots maintain girth across the diagonal,
-    // then taper gracefully into needle-fine capillary tips in the final 80%..96% zone
-    const distalTaper =
-      normDist > 0.78
-        ? lerp(1.0, 0.87, Math.min(1, (normDist - 0.78) / 0.19))
-        : 1.0;
-
-    const baseDecay =
-      (tip.isCapillary
-        ? 0.885 + rng() * 0.03
-        : tip.isLeader
-          ? tip.generation <= 1
-            ? 0.989
-            : tip.generation <= 3
-              ? 0.983
-              : 0.974
-          : tip.generation <= 1
-            ? 0.978
-            : tip.generation === 2
-              ? 0.968
-              : tip.generation === 3
-                ? 0.958
-                : 0.946) * distalTaper;
-
-    const nextThickness = Math.max(0.14, tip.thickness * baseDecay);
-
-    // Apply collar flare on the first segment of a newly sprouted branch for webbed V-junctions
-    const r1 = (tip.thickness * 0.5) * tip.collarScale;
-    const r2 = nextThickness * 0.5;
-
-    const color = interpolateRootColor(normDist);
-    const alpha = Math.max(
-      0.75,
-      Math.min(0.98, 0.75 + Math.pow(Math.min(1, tip.thickness / 8.0), 0.55) * 0.23)
-    );
-
-    segments.push({
-      step: tip.step,
-      x1: tip.x,
-      y1: tip.y,
-      cx,
-      cy,
-      x2,
-      y2,
-      r1,
-      r2,
-      a1: prevAngle,
-      a2: nextAngle,
-      color,
-      alpha
+    nodes.push({
+      x,
+      y,
+      r: startRadius,
+      angle,
+      normDist: startDist / maxDiagonal
     });
 
-    if (tip.step > maxStep) {
-      maxStep = tip.step;
-    }
+    for (let step = 1; step <= spec.maxSteps; step++) {
+      if (totalNodes + nodes.length >= maxTotalNodes && !spec.isLeader) {
+        break;
+      }
 
-    // Proximal Anastomosis (steps 5..28): bridge nearby thick roots to create hollow root islands
-    if (
-      !tip.isCapillary &&
-      tip.step >= 5 &&
-      tip.step <= 28 &&
-      tip.thickness >= 5.2
-    ) {
-      if (bridgesCreated < maxBridges && tip.step % 2 === 0) {
-        const minBridgeDist = 25 * Math.pow(viewportScale, 0.5);
-        const maxBridgeDist = 115 * Math.pow(viewportScale, 0.65);
+      const curDist = Math.hypot(x - originX, y - originY);
+      const curNormDist = curDist / maxDiagonal;
 
-        for (let i = trunkAnchors.length - 1; i >= 0; i--) {
-          const anchor = trunkAnchors[i];
-          if (anchor.trunkId === tip.trunkId) continue;
-          if (Math.abs(anchor.step - tip.step) > 8) continue;
+      // Gently deflect only if a branch actively aims outside the screen while
+      // in early/mid travel — letting side wings flourish across both flanks
+      if (curNormDist < 0.76) {
+        let bounceX = Math.cos(targetAngle);
+        let bounceY = Math.sin(targetAngle);
+        let bounced = false;
 
-          const dAnchor = Math.hypot(x2 - anchor.x, y2 - anchor.y);
-          if (dAnchor >= minBridgeDist && dAnchor <= maxBridgeDist && rng() < 0.45) {
-            const bridgeThick = Math.min(
-              9.5,
-              Math.max(4.0, Math.min(tip.thickness, anchor.thickness) * (0.42 + rng() * 0.18))
-            );
-            emitAnastomosisBridge(
-              segments,
-              rng,
-              x2,
-              y2,
-              anchor.x,
-              anchor.y,
-              tip.step,
-              bridgeThick,
-              originX,
-              originY,
-              maxDiagonal
-            );
-            bridgesCreated++;
-            break;
-          }
+        if (x < edgePadX && bounceX < 0) {
+          bounceX = Math.abs(bounceX) * 0.72;
+          bounced = true;
+        } else if (x > width - edgePadX && bounceX > 0) {
+          bounceX = -Math.abs(bounceX) * 0.72;
+          bounced = true;
+        }
+
+        if (y < edgePadY && bounceY < 0) {
+          bounceY = Math.abs(bounceY) * 0.72;
+          bounced = true;
+        } else if (y > height - edgePadY && bounceY > 0) {
+          bounceY = -Math.abs(bounceY) * 0.72;
+          bounced = true;
+        }
+
+        if (bounced) {
+          targetAngle = Math.atan2(bounceY, bounceX);
         }
       }
 
-      trunkAnchors.push({
-        x: x2,
-        y: y2,
-        step: tip.step,
-        trunkId: tip.trunkId,
-        thickness: nextThickness
+      const thicknessNorm = Math.min(1, thickness / (18 * trunkScale));
+      const baseStepLen = spec.isCapillary
+        ? lerp(5.0, 10.5, Math.min(1, thickness / 2.2)) *
+          Math.pow(viewportScale, 0.65)
+        : lerp(9.5, 20.5, Math.pow(thicknessNorm, 0.55)) * viewportScale;
+      const stepLength = baseStepLen * (0.9 + rng() * 0.2);
+
+      // Smooth organic harmonic curve without sharp polygonal breaks
+      const sCurveWave =
+        Math.sin(step * 0.22 + spec.seed) * 0.064 +
+        Math.cos(step * 0.11 - spec.seed * 0.6) * 0.046;
+      const subtleTurn = rng() < 0.14 ? (rng() - 0.5) * 0.13 : 0;
+      const pullStrength = spec.isLeader
+        ? 0.095
+        : spec.isCapillary
+          ? 0.035
+          : 0.075;
+      const anglePull = (targetAngle - angle) * pullStrength;
+
+      angularVel =
+        angularVel * 0.78 +
+        (rng() - 0.5) * (spec.isCapillary ? 0.11 : 0.072) +
+        sCurveWave * 0.45 +
+        subtleTurn +
+        anglePull;
+
+      const maxTurn = spec.isCapillary ? 0.28 : spec.isLeader ? 0.19 : 0.24;
+      angularVel = clamp(angularVel, -maxTurn, maxTurn);
+      angle += angularVel;
+
+      x += Math.cos(angle) * stepLength;
+      y += Math.sin(angle) * stepLength;
+
+      const dist = Math.hypot(x - originX, y - originY);
+      const normDist = dist / maxDiagonal;
+
+      const distalTaper =
+        normDist > 0.78
+          ? lerp(1.0, 0.88, Math.min(1, (normDist - 0.78) / 0.2))
+          : 1.0;
+
+      // Preserve robust body from start through mid-field before distal taper
+      const baseDecay =
+        (spec.isCapillary
+          ? 0.91 + rng() * 0.025
+          : spec.isLeader
+            ? spec.generation <= 1
+              ? 0.989
+              : 0.982
+            : spec.generation <= 1
+              ? 0.981
+              : spec.generation === 2
+                ? 0.971
+                : 0.956) * distalTaper;
+
+      thickness *= baseDecay;
+      const r = thickness * 0.5;
+
+      nodes.push({
+        x,
+        y,
+        r,
+        angle,
+        normDist
       });
-    }
 
-    // Distributed lateral "whiplash" capillary rootlets along the full diagonal span
-    const capProb = nextThickness < 3.5 ? 0.16 : 0.11;
-    if (
-      !tip.isCapillary &&
-      tip.step > 4 &&
-      nextThickness >= 0.42 &&
-      nextThickness <= 11.0 &&
-      segments.length < maxSegments - 450 &&
-      rng() < capProb
-    ) {
-      const sideSign = rng() < 0.5 ? 1 : -1;
-      const capAngle = nextAngle + sideSign * (0.42 + rng() * 0.52);
-      const capThickness = Math.min(2.2, Math.max(0.42, nextThickness * (0.26 + rng() * 0.18)));
-      const capSteps = 9 + Math.floor(rng() * 16);
+      // Proximal anastomosis web bridging across base-to-mid trunks
+      if (
+        spec.isLeader &&
+        !spec.isCapillary &&
+        step >= 3 &&
+        step <= 28 &&
+        thickness >= 4.8
+      ) {
+        const estimatedPhase = lerp(
+          spec.startPhase,
+          spec.endPhase,
+          clamp(step / Math.max(1, spec.maxSteps * 0.75), 0, 1)
+        );
+        const curAnchor: TrunkAnchor = {
+          x,
+          y,
+          step,
+          trunkId: spec.trunkId,
+          thickness,
+          phase: estimatedPhase
+        };
 
-      queue.push({
-        x: x2,
-        y: y2,
-        angle: capAngle,
-        targetAngle: capAngle + sideSign * (0.15 + rng() * 0.25),
-        angularVel: sideSign * (0.04 + rng() * 0.08),
-        thickness: capThickness,
-        collarScale: 1.22,
-        step: tip.step + 1,
-        stepsSinceSplit: 0,
-        nextSplitAt: 5 + Math.floor(rng() * 6),
-        generation: tip.generation + 2,
-        splitCount: tip.splitCount + 1,
-        trunkId: tip.trunkId,
-        seed: tip.seed + 19.7 + rng() * 30,
-        isLeader: false,
-        isCapillary: true,
-        maxSteps: tip.step + capSteps
-      });
-    }
+        if (bridgesCreated < maxBridges && step % 3 === 0) {
+          const minBridgeDist = 26 * Math.pow(viewportScale, 0.5);
+          const maxBridgeDist = 132 * Math.pow(viewportScale, 0.65);
 
-    tip.stepsSinceSplit++;
-    const maxGenAllowed = tip.isLeader ? 12 : 6;
-    const minSplitThickness = tip.isCapillary ? 0.38 : tip.isLeader ? 0.35 : 0.62;
-    const canNonLeaderSplit = tip.isLeader || segments.length < maxSegments - 1100;
-    const shouldSplit =
-      canNonLeaderSplit &&
-      tip.stepsSinceSplit >= tip.nextSplitAt &&
-      tip.generation < maxGenAllowed &&
-      nextThickness > minSplitThickness;
+          for (let a = trunkAnchors.length - 1; a >= 0; a--) {
+            const other = trunkAnchors[a];
+            if (other.trunkId === spec.trunkId) continue;
+            if (Math.abs(other.step - step) > 8) continue;
 
-    if (shouldSplit) {
-      const splitSign = rng() < 0.5 ? 1 : -1;
+            const dAnchor = Math.hypot(x - other.x, y - other.y);
+            if (
+              dAnchor >= minBridgeDist &&
+              dAnchor <= maxBridgeDist &&
+              rng() < 0.46
+            ) {
+              const bridge = buildAnastomosisBridge(
+                nextBranchId++,
+                rng,
+                curAnchor,
+                other,
+                originX,
+                originY,
+                maxDiagonal
+              );
+              branches.push(bridge);
+              totalNodes += bridge.nodes.length;
+              bridgesCreated++;
+              break;
+            }
+          }
+        }
 
-      if (tip.isLeader) {
-        // Murray's law conservation for leader taproots so they cross 88%-98% of the diagonal
-        const mainDeflection = -splitSign * (0.07 + rng() * 0.11);
-        const branchDeflection = splitSign * (0.26 + rng() * 0.34);
+        trunkAnchors.push(curAnchor);
+      }
 
-        const mainThickness = nextThickness * (0.89 + rng() * 0.05);
-        const branchThickness = nextThickness * (0.56 + rng() * 0.16);
-        const nextSplitCount = tip.splitCount + 1;
-        const leaderNextGen = tip.generation + (nextSplitCount % 2 === 0 ? 1 : 0);
+      if (
+        x < -outPad ||
+        x > width + outPad ||
+        y < -outPad ||
+        y > height + outPad ||
+        thickness < 0.32
+      ) {
+        break;
+      }
 
-        // Dominant leader continuation anchored near its diagonal trajectory
-        queue.push({
-          x: x2,
-          y: y2,
-          angle: nextAngle + mainDeflection,
-          targetAngle: tip.targetAngle + mainDeflection * 0.28,
-          angularVel: tip.angularVel * 0.45,
-          thickness: mainThickness,
-          collarScale: 1.15,
-          step: tip.step + 1,
-          stepsSinceSplit: 0,
-          nextSplitAt: 9 + Math.floor(rng() * 8),
-          generation: leaderNextGen,
-          splitCount: nextSplitCount,
-          trunkId: tip.trunkId,
-          seed: tip.seed + 5.3,
-          isLeader: true,
-          isCapillary: false,
-          maxSteps: tip.maxSteps
+      // Rich lateral needle capillaries along primary & secondary limbs
+      const capProb = isCompact ? 0.11 : 0.16;
+      if (
+        !spec.isCapillary &&
+        step > 3 &&
+        thickness >= 1.0 &&
+        thickness <= 14.0 &&
+        deferredForks.length < 24 &&
+        rng() < capProb
+      ) {
+        const sideSign = rng() < 0.5 ? 1 : -1;
+        const capAngle = angle + sideSign * (0.48 + rng() * 0.56);
+        const capThick = clamp(
+          thickness * (0.26 + rng() * 0.16),
+          0.65,
+          2.6
+        );
+        deferredForks.push({
+          nodeIndex: nodes.length - 1,
+          angle: capAngle,
+          targetAngle: capAngle + sideSign * (0.14 + rng() * 0.24),
+          angularVel: sideSign * (0.04 + rng() * 0.07),
+          thickness: capThick,
+          maxParentRadius: r * 0.76,
+          generation: spec.generation + 2,
+          splitCount: spec.splitCount + 1,
+          splitWait: 6,
+          trunkId: spec.trunkId,
+          seed: spec.seed + 19.7 + rng() * 30,
+          isLeader: false,
+          isCapillary: true,
+          maxSteps: 16 + Math.floor(rng() * 20)
         });
+      }
 
-        // Secondary diverging branch (occasionally promoted to sub-leader in mid-field)
-        const promoteSubLeader = normDist < 0.58 && branchThickness > 3.2 && rng() < 0.3;
-        queue.push({
-          x: x2,
-          y: y2,
-          angle: nextAngle + branchDeflection,
-          targetAngle: nextAngle + branchDeflection * 0.82,
+      // Abundant wide lateral branching especially from start through mid-field
+      stepsSinceSplit++;
+      const maxGen = spec.isLeader ? 6 : 4;
+      const minSplitThick = spec.isCapillary ? 1.0 : 1.5;
+      if (
+        stepsSinceSplit >= nextSplitAt &&
+        spec.generation < maxGen &&
+        thickness > minSplitThick &&
+        deferredForks.length < 28
+      ) {
+        stepsSinceSplit = 0;
+        const denseEarlyZone = normDist < 0.65;
+        nextSplitAt = spec.isLeader
+          ? (denseEarlyZone ? 4 : 7) + Math.floor(rng() * 4)
+          : (denseEarlyZone ? 5 : 7) + Math.floor(rng() * 5);
+
+        const splitSign =
+          (deferredForks.length + spec.trunkId) % 2 === 0
+            ? rng() < 0.72
+              ? 1
+              : -1
+            : rng() < 0.72
+              ? -1
+              : 1;
+        const wideSpread = denseEarlyZone
+          ? 0.40 + rng() * 0.36
+          : 0.32 + rng() * 0.32;
+        const branchDeflection = splitSign * wideSpread;
+        const branchThick = thickness * (0.58 + rng() * 0.18);
+        const promoteSubLeader =
+          spec.isLeader &&
+          normDist < 0.66 &&
+          branchThick > 3.0 &&
+          rng() < 0.52;
+
+        deferredForks.push({
+          nodeIndex: nodes.length - 1,
+          angle: angle + branchDeflection,
+          targetAngle: angle + branchDeflection * 0.92,
           angularVel: (rng() - 0.5) * 0.08,
-          thickness: branchThickness,
-          collarScale: 1.2,
-          step: tip.step + 1,
-          stepsSinceSplit: 0,
-          nextSplitAt: (promoteSubLeader ? 8 : 6) + Math.floor(rng() * 7),
-          generation: tip.generation + 1,
-          splitCount: nextSplitCount,
-          trunkId: tip.trunkId + 100 + tip.step,
-          seed: tip.seed + 13.9,
+          thickness: branchThick,
+          maxParentRadius: r * 0.76,
+          generation: spec.generation + 1,
+          splitCount: spec.splitCount + 1,
+          splitWait: 5,
+          trunkId: spec.trunkId + 100 + step,
+          seed: spec.seed + 13.9 + rng() * 17,
           isLeader: promoteSubLeader,
-          isCapillary: branchThickness < 1.1,
-          maxSteps: promoteSubLeader ? 280 : 220
+          isCapillary: !promoteSubLeader && branchThick < 1.25,
+          maxSteps: promoteSubLeader
+            ? isCompact
+              ? 76
+              : 102
+            : isCompact
+              ? 52
+              : 70
         });
+
+        // Subtle biomechanical counterweight on continuing trunk
+        const counterDeflection = -splitSign * (0.05 + rng() * 0.09);
+        angle += counterDeflection;
+        targetAngle += counterDeflection * 0.32;
+        thickness *= 0.93;
+      }
+    }
+
+    if (nodes.length < 2) continue;
+
+    applyNeedleTaper(nodes, false);
+
+    const branch: RootBranch = {
+      id: nextBranchId++,
+      generation: spec.generation,
+      isLeader: spec.isLeader,
+      isCapillary: spec.isCapillary,
+      isBridge: false,
+      startPhase: spec.startPhase,
+      endPhase: spec.endPhase,
+      nodes,
+      baked: false
+    };
+
+    branches.push(branch);
+    totalNodes += nodes.length;
+
+    const lastIdx = Math.max(1, nodes.length - 1);
+    for (let f = 0; f < deferredForks.length; f++) {
+      const fork = deferredForks[f];
+      const hostNode = nodes[fork.nodeIndex];
+      if (!hostNode || hostNode.r < 0.25) continue;
+
+      const forkPhase = lerp(
+        branch.startPhase,
+        branch.endPhase,
+        fork.nodeIndex / lastIdx
+      );
+
+      // Avoid spawning new twigs past 0.86 so every branch completes cleanly by 4.0s
+      if (forkPhase > 0.86) continue;
+
+      let childStart: number;
+      let childEnd: number;
+
+      if (fork.isCapillary || fork.generation >= 3) {
+        childStart = Math.max(0.28, forkPhase);
+        childEnd = Math.min(1.0, childStart + 0.16 + rng() * 0.16);
       } else {
-        // Non-leader secondary/tertiary asymmetric bifurcation
-        const mainDeflection = -splitSign * (0.11 + rng() * 0.18);
-        const branchDeflection = splitSign * (0.28 + rng() * 0.38);
-
-        const mainThickness = nextThickness * (0.82 + rng() * 0.07);
-        const branchThickness = nextThickness * (0.58 + rng() * 0.17);
-
-        queue.push({
-          x: x2,
-          y: y2,
-          angle: nextAngle + mainDeflection,
-          targetAngle: tip.targetAngle + mainDeflection * 0.6,
-          angularVel: tip.angularVel * 0.45,
-          thickness: mainThickness,
-          collarScale: 1.16,
-          step: tip.step + 1,
-          stepsSinceSplit: 0,
-          nextSplitAt: (tip.isCapillary ? 4 : 6) + Math.floor(rng() * 8),
-          generation: tip.generation + 1,
-          splitCount: tip.splitCount + 1,
-          trunkId: tip.trunkId,
-          seed: tip.seed + 5.3,
-          isLeader: false,
-          isCapillary: tip.isCapillary,
-          maxSteps: tip.maxSteps
-        });
-
-        queue.push({
-          x: x2,
-          y: y2,
-          angle: nextAngle + branchDeflection,
-          targetAngle: nextAngle + branchDeflection * 0.88,
-          angularVel: (rng() - 0.5) * 0.09,
-          thickness: branchThickness,
-          collarScale: 1.2,
-          step: tip.step + 1,
-          stepsSinceSplit: 0,
-          nextSplitAt: (tip.isCapillary ? 4 : 5) + Math.floor(rng() * 8),
-          generation: tip.generation + 1,
-          splitCount: tip.splitCount + 1,
-          trunkId: tip.trunkId + 100 + tip.step,
-          seed: tip.seed + 13.9,
-          isLeader: false,
-          isCapillary: tip.isCapillary || branchThickness < 1.15,
-          maxSteps: tip.maxSteps
-        });
+        childStart = forkPhase;
+        childEnd = Math.min(0.86, childStart + 0.24 + rng() * 0.14);
       }
 
-      // Occasional trifurcation or fine spur at major forks
-      if (nextThickness > 2.4 && segments.length < maxSegments - 300 && rng() < 0.34) {
-        const spurSign = -splitSign;
-        const spurAngle = nextAngle + spurSign * (0.48 + rng() * 0.32);
-        const spurThickness = nextThickness * (0.34 + rng() * 0.14);
-        queue.push({
-          x: x2,
-          y: y2,
-          angle: spurAngle,
-          targetAngle: spurAngle + spurSign * 0.18,
-          angularVel: (rng() - 0.5) * 0.1,
-          thickness: spurThickness,
-          collarScale: 1.18,
-          step: tip.step + 1,
-          stepsSinceSplit: 0,
-          nextSplitAt: 6 + Math.floor(rng() * 7),
-          generation: tip.generation + 2,
-          splitCount: tip.splitCount + 1,
-          trunkId: tip.trunkId + 200 + tip.step,
-          seed: tip.seed + 29.1,
-          isLeader: false,
-          isCapillary: spurThickness < 1.3,
-          maxSteps: tip.step + 36
-        });
+      if (childEnd - childStart < 0.08) {
+        childEnd = Math.min(1.0, childStart + 0.08);
       }
-    } else {
-      // Continue organic growth
-      queue.push({
-        ...tip,
-        x: x2,
-        y: y2,
-        angle: nextAngle,
-        thickness: nextThickness,
-        collarScale: 1.0,
-        step: tip.step + 1
+
+      pendingSpecs.push({
+        x: hostNode.x,
+        y: hostNode.y,
+        angle: fork.angle,
+        targetAngle: fork.targetAngle,
+        angularVel: fork.angularVel,
+        thickness: fork.thickness,
+        maxParentRadius: Math.min(fork.maxParentRadius, hostNode.r * 0.76),
+        generation: fork.generation,
+        splitCount: fork.splitCount,
+        splitWait: fork.splitWait,
+        trunkId: fork.trunkId,
+        seed: fork.seed,
+        isLeader: fork.isLeader,
+        isCapillary: fork.isCapillary,
+        maxSteps: fork.maxSteps,
+        startPhase: childStart,
+        endPhase: childEnd
       });
     }
   }
 
-  segments.sort((a, b) => a.step - b.step);
-  return { segments, maxStep: Math.max(1, maxStep) };
+  branches.sort((a, b) => a.startPhase - b.startPhase || a.id - b.id);
+  return branches;
 }
 
 /**
- * Draws the solid organic root collar/crown behind `.brand-mark` from which
- * all primary trunks emerge.
+ * Computes normalized left-hand perpendicular normals for an active polyline
+ * using central differences at interior vertices for smooth joint bends.
  */
-function drawRootCollar(
+function computeNormals(points: ActivePoint[]): Array<{ nx: number; ny: number }> {
+  const normals: Array<{ nx: number; ny: number }> = [];
+  let prevNx = 0;
+  let prevNy = 1;
+
+  for (let i = 0; i < points.length; i++) {
+    const pPrev = points[Math.max(0, i - 1)];
+    const pNext = points[Math.min(points.length - 1, i + 1)];
+    const dx = pNext.x - pPrev.x;
+    const dy = pNext.y - pPrev.y;
+    const len = Math.hypot(dx, dy);
+
+    if (len > 1e-5) {
+      prevNx = -dy / len;
+      prevNy = dx / len;
+    }
+    normals.push({ nx: prevNx, ny: prevNy });
+  }
+  return normals;
+}
+
+/**
+ * Renders an active or complete branch as ONE continuous closed Bezier ribbon
+ * converging cleanly to a single needle vertex `(tipX, tipY)` (`r = 0`).
+ * Always draws with `globalAlpha = 1.0` so forks and segments never create beads.
+ */
+function drawBranchRibbon(
   ctx: CanvasRenderingContext2D,
-  originX: number,
-  originY: number,
-  diagAngle: number
+  branch: RootBranch,
+  progress: number
 ): void {
+  const nodes = branch.nodes;
+  if (nodes.length < 2 || progress <= 0) return;
+
+  const p = clamp(progress, 0, 1);
+  const floatMaxIdx = p * (nodes.length - 1);
+  if (floatMaxIdx <= 0.002) return;
+
+  const active: ActivePoint[] = [];
+  const lastFull = Math.floor(floatMaxIdx);
+  const frac = floatMaxIdx - lastFull;
+
+  for (let i = 0; i <= lastFull; i++) {
+    active.push({
+      x: nodes[i].x,
+      y: nodes[i].y,
+      r: nodes[i].r,
+      normDist: nodes[i].normDist
+    });
+  }
+
+  if (frac > 0.001 && lastFull + 1 < nodes.length) {
+    const a = nodes[lastFull];
+    const b = nodes[lastFull + 1];
+    active.push({
+      x: lerp(a.x, b.x, frac),
+      y: lerp(a.y, b.y, frac),
+      r: lerp(a.r, b.r, frac),
+      normDist: lerp(a.normDist, b.normDist, frac)
+    });
+  }
+
+  if (active.length < 2) return;
+
+  // Apply live botanical needle spearhead when actively growing (`p < 1`)
+  if (p < 1) {
+    const taperSpan = Math.min(active.length - 1, 5);
+    const startTaper = active.length - 1 - taperSpan;
+    for (let k = 0; k <= taperSpan; k++) {
+      const idx = startTaper + k;
+      const t = k / taperSpan;
+      active[idx].r *= Math.pow(1 - t, 1.35);
+    }
+    active[active.length - 1].r = 0;
+  }
+
+  const L = active.length - 1;
+  const normals = computeNormals(active);
+
+  const lx: number[] = new Array(active.length);
+  const ly: number[] = new Array(active.length);
+  const rx: number[] = new Array(active.length);
+  const ry: number[] = new Array(active.length);
+
+  for (let i = 0; i < active.length; i++) {
+    const pt = active[i];
+    const n = normals[i];
+    lx[i] = pt.x + n.nx * pt.r;
+    ly[i] = pt.y + n.ny * pt.r;
+    rx[i] = pt.x - n.nx * pt.r;
+    ry[i] = pt.y - n.ny * pt.r;
+  }
+
+  const tx0 = normals[0].ny;
+  const ty0 = -normals[0].nx;
+  const r0 = active[0].r;
+
   ctx.save();
-  ctx.translate(originX, originY);
-  ctx.rotate(diagAngle - Math.PI * 0.5);
+  ctx.globalAlpha = 1.0;
 
-  // Soft ambient aura behind the crown
-  const grad = ctx.createRadialGradient(0, 4, 4, 0, 4, 42);
-  grad.addColorStop(0, "rgba(235, 188, 186, 0.55)");
-  grad.addColorStop(0.5, "rgba(196, 167, 231, 0.2)");
-  grad.addColorStop(1, "rgba(196, 167, 231, 0)");
-  ctx.fillStyle = grad;
-  ctx.beginPath();
-  ctx.arc(0, 4, 42, 0, Math.PI * 2);
-  ctx.fill();
+  const basePt = active[0];
+  const tipPt = active[L];
+  const spanDist = Math.hypot(tipPt.x - basePt.x, tipPt.y - basePt.y);
 
-  // Solid botanical root stump/collar silhouette matching the reference image
-  ctx.fillStyle = "rgb(235, 188, 186)";
-  ctx.globalAlpha = 0.94;
+  if (spanDist > 1.5) {
+    const midPt = active[Math.floor(active.length * 0.5)];
+    const grad = ctx.createLinearGradient(
+      basePt.x,
+      basePt.y,
+      tipPt.x,
+      tipPt.y
+    );
+    grad.addColorStop(0, interpolateRootColor(basePt.normDist));
+    grad.addColorStop(0.5, interpolateRootColor(midPt.normDist));
+    grad.addColorStop(1, interpolateRootColor(tipPt.normDist));
+    ctx.fillStyle = grad;
+  } else {
+    ctx.fillStyle = interpolateRootColor(basePt.normDist);
+  }
+
   ctx.beginPath();
-  ctx.moveTo(-16, -10);
-  ctx.quadraticCurveTo(0, -13, 16, -10);
-  ctx.quadraticCurveTo(19, 2, 24, 12);
-  ctx.quadraticCurveTo(0, 17, -24, 12);
-  ctx.quadraticCurveTo(-19, 2, -16, -10);
+  ctx.moveTo(lx[0], ly[0]);
+
+  if (L === 1) {
+    ctx.lineTo(lx[1], ly[1]);
+    if (tipPt.r > 0.01) {
+      ctx.lineTo(rx[1], ry[1]);
+    }
+    ctx.lineTo(rx[0], ry[0]);
+  } else {
+    // Smooth quadratic left wall to needle tip
+    ctx.lineTo((lx[0] + lx[1]) * 0.5, (ly[0] + ly[1]) * 0.5);
+    for (let i = 1; i < L; i++) {
+      const mx = (lx[i] + lx[i + 1]) * 0.5;
+      const my = (ly[i] + ly[i + 1]) * 0.5;
+      ctx.quadraticCurveTo(lx[i], ly[i], mx, my);
+    }
+    ctx.lineTo(lx[L], ly[L]);
+
+    if (tipPt.r > 0.01) {
+      ctx.lineTo(rx[L], ry[L]);
+    }
+
+    // Symmetric quadratic right wall back to base
+    ctx.lineTo((rx[L] + rx[L - 1]) * 0.5, (ry[L] + ry[L - 1]) * 0.5);
+    for (let i = L - 1; i >= 1; i--) {
+      const mx = (rx[i] + rx[i - 1]) * 0.5;
+      const my = (ry[i] + ry[i - 1]) * 0.5;
+      ctx.quadraticCurveTo(rx[i], ry[i], mx, my);
+    }
+    ctx.lineTo(rx[0], ry[0]);
+  }
+
+  // Smooth tucked rear base curve anchored inside parent/corner edge
+  ctx.quadraticCurveTo(
+    basePt.x - tx0 * r0 * 1.15,
+    basePt.y - ty0 * r0 * 1.15,
+    lx[0],
+    ly[0]
+  );
   ctx.closePath();
   ctx.fill();
-
   ctx.restore();
 }
 
 /**
- * Renders a single tapered polygonal root segment (`r1` -> `r2`) using
- * quadratic Bezier side walls and a seamless circular joint at `(x1, y1)`.
+ * Draws a subtle radial ambient crown centered directly on the viewport corner
+ * vertex so all trunks visibly originate flush from the screen corner edge.
  */
-function drawSegment(ctx: CanvasRenderingContext2D, seg: RootSegment): void {
-  const { x1, y1, cx, cy, x2, y2, r1, r2, a1, a2, color, alpha } = seg;
-
-  // Normal vectors perpendicular to start, control, and end tangents
-  const nx1 = -Math.sin(a1);
-  const ny1 = Math.cos(a1);
-  const nx2 = -Math.sin(a2);
-  const ny2 = Math.cos(a2);
-
-  const midAngle = Math.atan2(y2 - y1, x2 - x1);
-  const ncx = -Math.sin(midAngle);
-  const ncy = Math.cos(midAngle);
-  const rMid = (r1 + r2) * 0.5;
-
-  ctx.fillStyle = color;
-  ctx.globalAlpha = alpha;
-
-  // Tapered ribbon polygon with quadratic curved left and right walls
+function drawCornerCrownGlow(
+  ctx: CanvasRenderingContext2D,
+  originX: number,
+  originY: number
+): void {
+  ctx.save();
+  const grad = ctx.createRadialGradient(originX, originY, 4, originX, originY, 120);
+  grad.addColorStop(0, "rgba(235, 188, 186, 0.52)");
+  grad.addColorStop(0.45, "rgba(196, 167, 231, 0.18)");
+  grad.addColorStop(1, "rgba(196, 167, 231, 0)");
+  ctx.fillStyle = grad;
   ctx.beginPath();
-  ctx.moveTo(x1 + nx1 * r1, y1 + ny1 * r1);
-  ctx.quadraticCurveTo(
-    cx + ncx * rMid,
-    cy + ncy * rMid,
-    x2 + nx2 * r2,
-    y2 + ny2 * r2
-  );
-  ctx.lineTo(x2 - nx2 * r2, y2 - ny2 * r2);
-  ctx.quadraticCurveTo(
-    cx - ncx * rMid,
-    cy - ncy * rMid,
-    x1 - nx1 * r1,
-    y1 - ny1 * r1
-  );
-  ctx.closePath();
+  ctx.arc(originX, originY, 120, 0, Math.PI * 2);
   ctx.fill();
+  ctx.restore();
+}
 
-  // Seamless union joint at segment origin (creates smooth knuckle/collar on turns and forks)
-  if (r1 > 0.2) {
-    ctx.beginPath();
-    ctx.arc(x1, y1, r1, 0, Math.PI * 2);
-    ctx.fill();
-  }
+function measureOrigin(corner: CornerId): OriginMetrics {
+  const width = window.innerWidth;
+  const height = window.innerHeight;
+
+  const isLeft = corner === "top-left" || corner === "bottom-left";
+  const isTop = corner === "top-left" || corner === "top-right";
+
+  // Anchor right inside the exact screen corner vertex (no floating gap/stump)
+  const originX = isLeft ? -2 : width + 2;
+  const originY = isTop ? -2 : height + 2;
+  const targetX = isLeft ? width : 0;
+  const targetY = isTop ? height : 0;
+
+  const diagAngle = Math.atan2(targetY - originY, targetX - originX);
+  const maxDiagonal = Math.hypot(targetX - originX, targetY - originY) || 1;
+
+  return {
+    width,
+    height,
+    originX,
+    originY,
+    targetX,
+    targetY,
+    diagAngle,
+    maxDiagonal
+  };
 }
 
 export function initRootsBackground(canvas: HTMLCanvasElement): void {
   const ctx = canvas.getContext("2d");
   if (!ctx) return;
 
-  // Unique seed on every application open
+  // Clean up any legacy secondary pulse canvas left in DOM (e.g. during HMR)
+  canvas.parentElement
+    ?.querySelectorAll(".roots-canvas-pulse")
+    .forEach((el) => el.remove());
+
+  const bakedCanvas = document.createElement("canvas");
+  const bakedCtx = bakedCanvas.getContext("2d");
+  if (!bakedCtx) return;
+
+  // Pick one unique session seed and corner at random per page load
   const sessionSeed =
     ((Date.now() ^ Math.floor(Math.random() * 0xffffffff)) ^ 0x5f3759df) >>> 0;
+  const sessionCorner = CORNERS[sessionSeed % CORNERS.length];
+
   const reducedMotionQuery = window.matchMedia("(prefers-reduced-motion: reduce)");
 
   let rafId: number | null = null;
   let resizeTimer: number | null = null;
 
-  function measureOrigin(): { width: number; height: number; originX: number; originY: number } {
-    const width = window.innerWidth;
-    const height = window.innerHeight;
-    const brandMark = document.querySelector<HTMLElement>(".brand-mark");
+  function configureBuffers(width: number, height: number): void {
+    const mainDpr = Math.min(window.devicePixelRatio || 1, 2);
 
-    if (brandMark) {
-      const rect = brandMark.getBoundingClientRect();
-      return {
-        width,
-        height,
-        originX: rect.left + rect.width * 0.5,
-        originY: rect.top + rect.height * 0.5
-      };
-    }
+    canvas.width = Math.floor(width * mainDpr);
+    canvas.height = Math.floor(height * mainDpr);
+    ctx!.setTransform(mainDpr, 0, 0, mainDpr, 0, 0);
 
-    return { width, height, originX: 48, originY: 32 };
+    bakedCanvas.width = canvas.width;
+    bakedCanvas.height = canvas.height;
+    bakedCtx!.setTransform(mainDpr, 0, 0, mainDpr, 0, 0);
   }
 
-  function setupCanvasDimensions(width: number, height: number): void {
-    const dpr = Math.min(window.devicePixelRatio || 1, 2);
-    canvas.width = Math.floor(width * dpr);
-    canvas.height = Math.floor(height * dpr);
-    ctx!.setTransform(dpr, 0, 0, dpr, 0, 0);
+  function blitBakedToMain(): void {
+    ctx!.save();
+    ctx!.setTransform(1, 0, 0, 1, 0, 0);
+    ctx!.clearRect(0, 0, canvas.width, canvas.height);
+    ctx!.drawImage(bakedCanvas, 0, 0);
+    ctx!.restore();
   }
 
   function renderStatic(): void {
@@ -740,16 +971,21 @@ export function initRootsBackground(canvas: HTMLCanvasElement): void {
       rafId = null;
     }
 
-    const { width, height, originX, originY } = measureOrigin();
-    setupCanvasDimensions(width, height);
-    ctx!.clearRect(0, 0, width, height);
+    const metrics = measureOrigin(sessionCorner);
+    configureBuffers(metrics.width, metrics.height);
 
-    const diagAngle = Math.atan2(height - originY, width - originX);
-    const { segments } = buildRootNetwork(width, height, originX, originY, sessionSeed);
-    drawRootCollar(ctx!, originX, originY, diagAngle);
-    for (let i = 0; i < segments.length; i++) {
-      drawSegment(ctx!, segments[i]);
+    ctx!.clearRect(0, 0, metrics.width, metrics.height);
+    bakedCtx!.clearRect(0, 0, metrics.width, metrics.height);
+
+    const branches = buildRootNetwork(metrics, sessionSeed);
+    drawCornerCrownGlow(bakedCtx!, metrics.originX, metrics.originY);
+
+    for (let i = 0; i < branches.length; i++) {
+      drawBranchRibbon(bakedCtx!, branches[i], 1);
+      branches[i].baked = true;
     }
+
+    blitBakedToMain();
     canvas.classList.add("is-settled");
   }
 
@@ -759,38 +995,66 @@ export function initRootsBackground(canvas: HTMLCanvasElement): void {
       return;
     }
 
-    const { width, height, originX, originY } = measureOrigin();
-    setupCanvasDimensions(width, height);
-    ctx!.clearRect(0, 0, width, height);
+    if (rafId !== null) {
+      window.cancelAnimationFrame(rafId);
+      rafId = null;
+    }
 
-    const diagAngle = Math.atan2(height - originY, width - originX);
-    const { segments, maxStep } = buildRootNetwork(width, height, originX, originY, sessionSeed);
-    drawRootCollar(ctx!, originX, originY, diagAngle);
+    canvas.classList.remove("is-settled");
 
-    let cursor = 0;
-    const durationMs = 3200;
+    const metrics = measureOrigin(sessionCorner);
+    configureBuffers(metrics.width, metrics.height);
+
+    ctx!.clearRect(0, 0, metrics.width, metrics.height);
+    bakedCtx!.clearRect(0, 0, metrics.width, metrics.height);
+
+    const branches = buildRootNetwork(metrics, sessionSeed);
+    drawCornerCrownGlow(bakedCtx!, metrics.originX, metrics.originY);
+
+    const durationMs = 4000;
     const startTime = performance.now();
 
     function frame(now: number): void {
       const elapsed = now - startTime;
       const rawProgress = Math.min(1, elapsed / durationMs);
-      // Smooth ease-out for rapid primary trunk burst and delicate capillary finish
-      const easedProgress = 1 - Math.pow(1 - rawProgress, 2.4);
-      const targetStep = easedProgress * maxStep;
 
-      while (cursor < segments.length && segments[cursor].step <= targetStep) {
-        drawSegment(ctx!, segments[cursor]);
-        cursor++;
+      // Bake newly completed branches once onto offscreen cache
+      for (let i = 0; i < branches.length; i++) {
+        const b = branches[i];
+        if (!b.baked && rawProgress >= b.endPhase) {
+          drawBranchRibbon(bakedCtx!, b, 1);
+          b.baked = true;
+        }
+      }
+
+      // 1:1 device-pixel copy of finished branches
+      blitBakedToMain();
+
+      // Draw only actively growing wave branches with live needle tips
+      for (let i = 0; i < branches.length; i++) {
+        const b = branches[i];
+        if (b.baked || rawProgress < b.startPhase) continue;
+
+        const span = Math.max(0.01, b.endPhase - b.startPhase);
+        const linearLocal = clamp((rawProgress - b.startPhase) / span, 0, 1);
+        const easedLocal = 1 - Math.pow(1 - linearLocal, 1.85);
+        drawBranchRibbon(ctx!, b, easedLocal);
       }
 
       if (rawProgress < 1) {
         rafId = window.requestAnimationFrame(frame);
       } else {
-        while (cursor < segments.length) {
-          drawSegment(ctx!, segments[cursor]);
-          cursor++;
+        for (let i = 0; i < branches.length; i++) {
+          const b = branches[i];
+          if (!b.baked) {
+            drawBranchRibbon(bakedCtx!, b, 1);
+            b.baked = true;
+          }
         }
+        blitBakedToMain();
         rafId = null;
+
+        // Hand off single unified pulse to CSS GPU opacity animation (0% JS CPU)
         canvas.classList.add("is-settled");
       }
     }
@@ -798,10 +1062,14 @@ export function initRootsBackground(canvas: HTMLCanvasElement): void {
     rafId = window.requestAnimationFrame(frame);
   }
 
-  // Start organic growth on initial application load
   runGrowthAnimation();
 
-  // Debounced static redraw on viewport resize so roots remain anchored behind .brand-mark
+  reducedMotionQuery.addEventListener("change", () => {
+    if (reducedMotionQuery.matches) {
+      renderStatic();
+    }
+  });
+
   let lastWidth = window.innerWidth;
   let lastHeight = window.innerHeight;
 
@@ -810,7 +1078,7 @@ export function initRootsBackground(canvas: HTMLCanvasElement): void {
     () => {
       const dw = Math.abs(window.innerWidth - lastWidth);
       const dh = Math.abs(window.innerHeight - lastHeight);
-      if (dw < 40 && dh < 60) return;
+      if (dw < 48 && dh < 120) return;
 
       if (resizeTimer !== null) {
         window.clearTimeout(resizeTimer);

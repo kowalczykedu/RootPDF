@@ -131,6 +131,10 @@ export class PdfCreatorStudio {
   private addImageBtn!: HTMLButtonElement;
   private addSignatureBtn!: HTMLButtonElement;
   private imageInput!: HTMLInputElement;
+  private pageSettingsToggleBtn!: HTMLButtonElement;
+  private pageSettingsSummaryEl!: HTMLElement;
+  private pageSettingsPanel!: HTMLElement;
+  private pageSettingsOpenMobile = false;
   private resetDraftBtn!: HTMLButtonElement;
   private pageSizeSelect!: HTMLSelectElement;
   private orientationSelect!: HTMLSelectElement;
@@ -256,7 +260,22 @@ export class PdfCreatorStudio {
             <input id="creatorImageInput" type="file" accept=".png,.jpg,.jpeg,.webp,.avif,.svg,image/*" hidden />
           </div>
 
-          <div class="creator-page-settings">
+          <button
+            id="creatorPageSettingsToggle"
+            type="button"
+            class="button ghost compact-btn creator-settings-toggle"
+            aria-expanded="false"
+            aria-controls="creatorPageSettings"
+            aria-label="Opções de folha e rascunho"
+          >
+            <span class="creator-settings-toggle-left">
+              ${ICONS.sliders}
+              <span id="creatorPageSettingsSummary">Folha: A4 · Retrato</span>
+            </span>
+            <span class="creator-settings-chevron" aria-hidden="true">${ICONS.arrowDown}</span>
+          </button>
+
+          <div id="creatorPageSettings" class="creator-page-settings">
             <label class="insp-field" for="creatorPageSize">
               <span>Folha</span>
               <select id="creatorPageSize">
@@ -372,6 +391,9 @@ export class PdfCreatorStudio {
     this.addImageBtn = this.q("creatorAddImageBtn");
     this.addSignatureBtn = this.q("creatorAddSigBtn");
     this.imageInput = this.q("creatorImageInput");
+    this.pageSettingsToggleBtn = this.q("creatorPageSettingsToggle");
+    this.pageSettingsSummaryEl = this.q("creatorPageSettingsSummary");
+    this.pageSettingsPanel = this.q("creatorPageSettings");
     this.resetDraftBtn = this.q("creatorResetBtn");
     this.pageSizeSelect = this.q("creatorPageSize");
     this.orientationSelect = this.q("creatorOrientation");
@@ -527,6 +549,15 @@ export class PdfCreatorStudio {
       this.signatureModal.open((sig) => {
         this.insertSignatureBlock(sig.label, sig.dataUrl, sig.aspectRatio);
       });
+    });
+
+    this.pageSettingsToggleBtn.addEventListener("click", () => {
+      this.pageSettingsOpenMobile = !this.pageSettingsOpenMobile;
+      this.pageSettingsPanel.classList.toggle("is-open", this.pageSettingsOpenMobile);
+      this.pageSettingsToggleBtn.setAttribute(
+        "aria-expanded",
+        String(this.pageSettingsOpenMobile)
+      );
     });
 
     this.pageSizeSelect.addEventListener("change", () => {
@@ -902,6 +933,15 @@ export class PdfCreatorStudio {
     this.pageSizeSelect.value = page.pageSize;
     this.orientationSelect.value = page.orientation;
     this.bgSelect.value = page.backgroundColor;
+
+    const sizeLabel =
+      page.pageSize === "letter"
+        ? "Carta"
+        : page.pageSize === "legal"
+          ? "Ofício"
+          : page.pageSize.toUpperCase();
+    const orientLabel = page.orientation === "landscape" ? "Paisagem" : "Retrato";
+    this.pageSettingsSummaryEl.textContent = `Folha: ${sizeLabel} · ${orientLabel}`;
 
     this.fitSheetToStage();
     const dims = getCreatorPageSizePt(page);
